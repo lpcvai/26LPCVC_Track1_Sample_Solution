@@ -1,0 +1,5 @@
+torch
+qai_hub
+qai_hub_models
+onnx_script
+clip @ git+https://github.com/openai/CLIP.git@dcba3cb2e2827b402d2701e7e1c7d9fed8a20ef1
