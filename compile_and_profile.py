@@ -59,17 +59,18 @@ except onnx.checker.ValidationError as e:
     print("Text ONNX model validation failed ❌")
     print(e)
 
+target_device = qai_hub.Device("XR2 Gen 2 (Proxy)")
 
 # Submit compilation jobs
 print("\nSubmitting compilation jobs to QAI Hub...")
 img_id = compile_model(
     model=onnx_img_model, 
-    device=qai_hub.Device("Snapdragon 8 Elite QRD"), 
+    device=target_device, 
     input_specs={"image": (1, 3, 224, 224)}
 )
 txt_id = compile_model(
     model=onnx_txt_model, 
-    device=qai_hub.Device("Snapdragon 8 Elite QRD"), 
+    device=target_device, 
     input_specs={"text": ((1, 77), "int64")}
 )
 
@@ -80,11 +81,11 @@ print(f"Text compilation job ID: {txt_id}")
 # Submit profiling jobs
 print("\nSubmitting profiling jobs to QAI Hub...")
 run_profile(
-    qai_hub.get_job(img_id).get_target_model(), 
-    qai_hub.Device("Snapdragon 8 Elite QRD")
+    model=qai_hub.get_job(img_id).get_target_model(), 
+    device=target_device
 )
 run_profile(
-    qai_hub.get_job(txt_id).get_target_model(), 
-    qai_hub.Device("Snapdragon 8 Elite QRD")
+    model=qai_hub.get_job(txt_id).get_target_model(), 
+    device=target_device
 )
 print("Profiling jobs submitted for both models.")
