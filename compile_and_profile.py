@@ -22,7 +22,7 @@ def compile_model(model, device, input_specs):
         model=model,
         device=device,
         input_specs=input_specs,
-        options="--target_runtime qnn_lib_aarch64_android --truncate_64bit_io"
+        options="--target_runtime qnn_dlc --truncate_64bit_io"
     )
     return compile_job.job_id
 
