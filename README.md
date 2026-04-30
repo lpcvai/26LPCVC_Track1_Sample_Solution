@@ -85,7 +85,7 @@ Before running inference, datasets must be uploaded to AI Hub using `upload_data
 * Uploading the dataset and returning a dataset ID to be used in inference scripts.
 
 ```bash
-python src/upload_dataset.py
+python data/upload_dataset.py
 ```
 
 This will print a `dataset_id` that you can use in `src/inference.py`.
