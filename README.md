@@ -85,10 +85,10 @@ Before running inference, datasets must be uploaded to AI Hub using `upload_data
 * Uploading the dataset and returning a dataset ID to be used in inference scripts.
 
 ```bash
-python upload_dataset.py
+python src/upload_dataset.py
 ```
 
-This will print a `dataset_id` that you can use in `inference.py`.
+This will print a `dataset_id` that you can use in `src/inference.py`.
 
 ### **4. Run Inference and Evaluate**
 
@@ -100,7 +100,7 @@ The `inference.py` script runs the compiled models on the uploaded datasets:
 4. Computes evaluation metrics, such as **Recall@10**, which measures how often the correct text is among the top-10 retrieved results for each image.
 
 ```bash
-python inference.py
+python src/inference.py
 ```
 
 After completion, the script prints the Recall@10 score for the dataset.
