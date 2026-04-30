@@ -3,6 +3,9 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics.pairwise import cosine_similarity
 
+from utils.ground_truth import get_ground_truth
+from utils.refcoco_utils import RefCocoSplit
+
 def run_inference(model, device, input_dataset):
     """Submits an inference job for the model and returns the output data."""
     inference_job = qai_hub.submit_inference_job(
@@ -15,29 +18,10 @@ def run_inference(model, device, input_dataset):
     inference_job.wait()
     return inference_job.job_id
 
-def parse_ground_truth(txt_list, img_list):
-    # Load your CSV
-    df_img = pd.read_csv(img_list)
-    df_txt = pd.read_csv(txt_list)
 
-    # Get unique text prompts in order from the second column
-    txt_id = df_txt.iloc[:, 0].dropna().astype(np.int16).tolist()
-    gt = df_img.iloc[:, 1].dropna().tolist() # list of txt id for each image
-    return txt_id, gt
-
-
-def evaluate_track1(img_output, txt_output, txt_list, img_list, k=10):
+def evaluate_track1(img_output, txt_output, split: RefCocoSplit, k=10):
     """
-    Compute Recall@K between image and text embeddings.
-
-    Args:
-        img_output (np.ndarray): Image encoder output, shape (N, D)
-        txt_output (np.ndarray): Text encoder output, shape (M, D)
-        ground_truth_dir (str): Path to ground truth JSON file
-        k (int): Top-K for recall computation
-
-    Returns:
-        float: Mean recall@K (accuracy)
+    Compute Recall@K between image and text embeddings using HF RefCOCO annotations.
     """
 
     # Stack them into a single 2D array: [batch, D]
@@ -51,18 +35,19 @@ def evaluate_track1(img_output, txt_output, txt_list, img_list, k=10):
     # Now similarity will work
     sim_matrix = cosine_similarity(img_embeds, txt_embeds)
 
-    # Load ground truth
-    txt_id, gt = parse_ground_truth(txt_list, img_list)
+    txt_id, gt = get_ground_truth(split)
+
+    assert len(img_embeds) == len(gt), (len(img_embeds), len(gt))
+    assert len(txt_embeds) == len(txt_id), (len(txt_embeds), len(txt_id))
 
     recalls = []
 
-    # print(len(img_embeds))
-
     for i in range(len(img_embeds)):
+        gt_ids = gt[i]["captions"]
 
         # print(txt_id[i])
         # print(gt[i])
-        gt_ids = [int(x) for x in gt[i].split(';')]
+        txt_id, gt = get_ground_truth(split)
 
         # Top-K text indices by similarity
         k = 10
@@ -82,11 +67,11 @@ def evaluate_track1(img_output, txt_output, txt_list, img_list, k=10):
 
     return np.mean(recalls)
 
+
 #Define target device
 device = qai_hub.Device("XR2 Gen 2 (Proxy)")
 
-
-
+# TODO: Automate this :/
 # TODO: Define tasks with their corresponding compiled job IDs and dataset IDs
 tasks = {
     "text": {

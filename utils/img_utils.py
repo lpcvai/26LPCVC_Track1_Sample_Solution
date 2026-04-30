@@ -15,7 +15,9 @@ def process_image(image_path, target_size=(224, 224)):
 
 def load_images(folder_path: Path, split=None, target_size=(224, 224)):
     """Loads and processes all the RefCOCO images in the given folder."""
-    image_paths = load_annotations(split)["image_path"]
+    imgs = load_annotations(split)
+    imgs.sort("ann_id")
+    image_paths = imgs["image_path"]
     return [process_image(folder_path / path, target_size) for path in image_paths]
 
 

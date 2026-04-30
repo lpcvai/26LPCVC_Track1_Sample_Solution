@@ -27,7 +27,7 @@ if input_data:
 print(qai_hub.upload_dataset({"image": input_data}))
 
 dataset = load_annotations(RefCocoSplit.VAL)
-prompts = list(chain.from_iterable(dataset["captions"]))
+prompts = sorted(set(chain.from_iterable(dataset["captions"])))
 
 # Load CLIP tokenizer
 tokenizer = CLIPTokenizer.from_pretrained("openai/clip-vit-base-patch32")
