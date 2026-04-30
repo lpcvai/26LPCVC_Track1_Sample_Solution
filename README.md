@@ -1,4 +1,4 @@
-# LPCVC 2026 Track 1 - Image-to-Text Retrieval Sample Solution
+# LPCVC 2026 Track 1 - Image-to-Text Retrieval Solution
 
 ## For Submissions
 
@@ -30,7 +30,7 @@ This repository contains Python scripts designed to extract, compile, and profil
 
 ## **Requirements**
 
-* Python 3.9+
+* Python 3.9 - 3.12
 * Torch and torchvision
 * QAI Hub
 * Required packages listed in `requirements.txt`
@@ -42,16 +42,16 @@ This repository contains Python scripts designed to extract, compile, and profil
 ### **Step 1: Clone the Repository**
 
 ```bash
-git clone https://github.com/lpcvai/26LPCVC_Track1_Sample_Solution.git
-cd 26LPCVC_Track1_Sample_Solution
+git clone https://github.com/thedeveloper101/cmsc-472-final-project.git
+cd cmsc472-final-project
 ```
 
 ### **Step 2: Install Dependencies**
 
-Ensure you have Python 3.9+ installed. Install the required Python packages:
+Ensure you have Python 3.9 - 3.12 installed. Install the required Python packages:
 
 ```bash
-pip install -r requirements.txt
+pip install --build-constraint build-constraints.txt -r requirements.txt
 ```
 
 ---
