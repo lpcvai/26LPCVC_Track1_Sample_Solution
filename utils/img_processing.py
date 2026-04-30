@@ -17,4 +17,4 @@ if input_data:
     print(f"First image shape: {input_data[0].shape}")  # Should be (1, 3, 224, 224)
 
 # Upload dataset
-print(qai_hub.upload_dataset({"image": input_data}))
+# print(qai_hub.upload_dataset({"image": input_data}))

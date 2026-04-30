@@ -2,13 +2,13 @@ import pandas as pd
 from transformers import CLIPTokenizer
 import torch
 import numpy as np  # import numpy
+from itertools import chain
 
-# Load your CSV
-csv_path = ""  # prompt list file path
-df = pd.read_csv(csv_path)
+from utils.refcoco_utils import RefCocoSplit
+from utils.text_utils import load_annotations
 
-# Get unique text prompts in order from the second column, drop NaN
-prompts = df.iloc[:, 1].dropna().tolist()
+dataset = load_annotations(RefCocoSplit.VAL)
+prompts = list(chain.from_iterable(dataset["captions"]))
 
 # Load CLIP tokenizer
 tokenizer = CLIPTokenizer.from_pretrained("openai/clip-vit-base-patch32")

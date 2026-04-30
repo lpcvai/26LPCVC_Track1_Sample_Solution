@@ -13,7 +13,7 @@ class RefCocoSplit(StrEnum):
     VAL = "validation"
 
 
-def get_refcoco_dataset(split: RefCocoSplit | None = None) -> DatasetDict:
+def download_refcoco_dataset(split: RefCocoSplit | list[RefCocoSplit] | None = None) -> DatasetDict:
     """
     TODO: Write this
     """

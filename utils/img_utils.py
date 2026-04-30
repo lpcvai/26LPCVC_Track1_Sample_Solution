@@ -1,20 +1,9 @@
-import os
 from pathlib import Path
 
-
-import datasets
 import numpy as np
 from PIL import Image
-from datasets import Dataset, DatasetDict
 
-from utils.refcoco_utils import RefCocoSplit
-
-REFCOCO_UNC_DIR = Path("data/annotations/refcoco-unc")
-
-def load_annotations(split: RefCocoSplit | None = None) -> Dataset | DatasetDict:
-    if split is None:
-        return datasets.load_from_disk(REFCOCO_UNC_DIR)
-    return datasets.load_from_disk(REFCOCO_UNC_DIR / split)
+from utils.text_utils import load_annotations
 
 
 def process_image(image_path, target_size=(224, 224)):
