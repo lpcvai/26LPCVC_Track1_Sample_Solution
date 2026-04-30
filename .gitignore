@@ -1,6 +1,7 @@
 exported_onnx/
 dataset/
 ids.txt
+data/coco
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
