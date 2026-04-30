@@ -1,6 +1,6 @@
 import qai_hub
 
-from utils import load_images_from_folder
+from utils.img_utils import load_images_from_folder
 
 
 # TODO: Define image folder path
