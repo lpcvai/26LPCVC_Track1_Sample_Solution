@@ -1,13 +1,14 @@
+from pathlib import Path
+
 import qai_hub
 
-from utils.img_utils import load_images_from_folder
+from utils.img_utils import load_images
+from utils.refcoco_utils import RefCocoSplit
 
-
-# TODO: Define image folder path
-image_folder = ""
+data_folder = Path("data")
 
 # Process images
-input_data = load_images_from_folder(image_folder)
+input_data = load_images(data_folder, RefCocoSplit.VAL)
 print(len(input_data))
 
 # Check dataset properties

@@ -1,7 +1,6 @@
 from enum import StrEnum
 
 from datasets import load_dataset, DatasetDict
-from datasets.arrow_dataset import Dataset
 
 
 class RefCocoSplit(StrEnum):

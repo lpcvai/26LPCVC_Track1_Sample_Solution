@@ -4,17 +4,20 @@ import qai_hub
 
 
 from utils.img_utils import load_images_from_folder
+from utils.refcoco_utils import RefCocoSplit
 
-# TODO: Define image folder path
-image_folder = "dataset/images"  # change to your folder
+SPLIT = RefCocoSplit.VAL
+DATA_FOLDER = Path("data")
 
 # Process images
-input_image = load_images_from_folder(image_folder)
-print(len(input_image))
+input_data = load_images(data_folder, SPLIT)
+print(len(input_data))
 
 # Check dataset properties
-print(f"Processed {len(input_image)} images.")
-print(f"First image shape: {input_image[0].shape}")  # Should be (1, 3, 224, 224)
+if input_data:
+    print(f"Processed {len(input_data)} images.")
+    print(f"First image shape: {input_data[0].shape}")  # Should be (1, 3, 224, 224)
+
 
 # Upload dataset
 print(qai_hub.upload_dataset({"image": input_image}))

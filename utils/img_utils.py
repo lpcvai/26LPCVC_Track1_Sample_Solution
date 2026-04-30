@@ -1,7 +1,20 @@
 import os
+from pathlib import Path
 
+
+import datasets
 import numpy as np
 from PIL import Image
+from datasets import Dataset, DatasetDict
+
+from utils.refcoco_utils import RefCocoSplit
+
+REFCOCO_UNC_DIR = Path("data/annotations/refcoco-unc")
+
+def load_annotations(split: RefCocoSplit | None = None) -> Dataset | DatasetDict:
+    if split is None:
+        return datasets.load_from_disk(REFCOCO_UNC_DIR)
+    return datasets.load_from_disk(REFCOCO_UNC_DIR / split)
 
 
 def process_image(image_path, target_size=(224, 224)):
@@ -10,10 +23,12 @@ def process_image(image_path, target_size=(224, 224)):
     image_array = np.array(image, dtype=np.float32) / 255.0  # Normalize
     return np.transpose(image_array, (2, 0, 1))[np.newaxis, :]  # Convert to (1, C, H, W)
 
-def load_images_from_folder(folder_path, target_size=(224, 224)):
-    """Loads and processes all images in a folder, sorted by name."""
-    image_paths = sorted([
-        os.path.join(folder_path, f) for f in os.listdir(folder_path)
-        if f.lower().endswith(('.jpg', '.png', '.jpeg', '.webp'))
-    ])
-    return [process_image(path, target_size) for path in image_paths]
+
+def load_images(folder_path: Path, split=None, target_size=(224, 224)):
+    """Loads and processes all the RefCOCO images in the given folder."""
+    image_paths = load_annotations(split)["image_path"]
+    return [process_image(folder_path / path, target_size) for path in image_paths]
+
+
+
+
