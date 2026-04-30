@@ -10,7 +10,7 @@ from utils.img_utils import load_images
 from utils.refcoco_utils import RefCocoSplit
 from utils.text_utils import load_annotations
 
-SPLIT = RefCocoSplit.VAL
+SPLIT = RefCocoSplit.TEST
 DATA_FOLDER = Path("data")
 
 # Process images
@@ -24,7 +24,7 @@ if input_data:
     assert input_data[0].shape == (1, 3, 224, 224)
 
 # Upload dataset
-print(qai_hub.upload_dataset({"image": input_data}))
+print(qai_hub.upload_dataset({"image": input_data}, name="image_dataset"))
 
 dataset = load_annotations(RefCocoSplit.VAL)
 prompts = sorted(set(chain.from_iterable(dataset["captions"])))
@@ -50,4 +50,4 @@ print(tokenized_texts[0].dtype)  # int32
 assert tokenized_texts[0].shape == (1, 77)
 assert tokenized_texts[0].dtype == np.int32
 
-print(qai_hub.upload_dataset({"text": tokenized_texts}))
+print(qai_hub.upload_dataset({"text": tokenized_texts}, name="text_dataset"))

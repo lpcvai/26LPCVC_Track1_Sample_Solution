@@ -1,21 +1,21 @@
-import qai_hub
 import numpy as np
-import pandas as pd
+import qai_hub
 from sklearn.metrics.pairwise import cosine_similarity
 
 from utils.ground_truth import get_ground_truth
 from utils.refcoco_utils import RefCocoSplit
 
-def run_inference(model, device, input_dataset):
+
+def run_inference(model, device, input_dataset, job_name=None):
     """Submits an inference job for the model and returns the output data."""
     inference_job = qai_hub.submit_inference_job(
         model=model,
         device=device,
         inputs=input_dataset,
-        options="--max_profiler_iterations 1"
+        options="--max_profiler_iterations 1",
+        name=job_name
     )
     # return inference_job.download_output_data()
-    inference_job.wait()
     return inference_job.job_id
 
 
@@ -84,31 +84,30 @@ tasks = {
     }
 }
 
-# Dictionary to store outputs separately
-outputs = {}
+inference_jobs = {}
 
 for task_name, info in tasks.items():
     compiled_id = info["compiled_id"]
     input_dataset = qai_hub.get_dataset(info["dataset_id"])
 
-    # Retrieve the compiled model
     job = qai_hub.get_job(compiled_id)
     compiled_model = job.get_target_model()
 
-    # Run inference
-    print(f"Running inference for {task_name} model {compiled_model.model_id} on device {device.name}")
-    inference_id = run_inference(compiled_model, device, input_dataset)
-    inference_job = qai_hub.get_job(inference_id)
+    print(f"Submitting inference for {task_name} model {compiled_model.model_id} on device {device.name}")
 
-    if inference_job.get_status().failure:
-        print(f"{task_name.capitalize()} inference failed")
-        outputs[task_name] = None
-    else:
-        inference_output = inference_job.download_output_data()
-        outputs[task_name] = inference_output['output_0']
+    inference_id = run_inference(compiled_model, device, input_dataset)
+    inference_jobs[task_name] = qai_hub.get_job(inference_id)
+
+# Then collect outputs
+outputs = {}
+
+for task_name, inference_job in inference_jobs.items():
+    inference_output = inference_job.download_output_data() # waits here
+    outputs[task_name] = inference_output["output_0"]
+
 
 text_output = outputs["text"]
 image_output = outputs["image"]
 
-result = evaluate_track1(image_output, text_output, "dataset/txt_list.csv", "dataset/img_list.csv")
+result = evaluate_track1(image_output, text_output, RefCocoSplit.TEST)
 print(result)

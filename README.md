@@ -51,11 +51,27 @@ cd cmsc472-final-project
 Ensure you have Python 3.9 - 3.12 installed. Install the required Python packages:
 
 ```bash
-pip install --build-constraint build-constraints.txt -r requirements.txt
+pip install -e .
+pip install -r requirements.txt
+```
+---
+
+## **Downloading The Dataset**
+
+### **1. Downloading the Images**
+
+Run this bash script to download the dataset's images
+```bash
+bash data/dowmload_imgs.sh
+```
+
+### **2. Downloading the Annotations**
+Run this python script download the dataset's annotations.
+```bash
+python data/download_RefCOCO
 ```
 
 ---
-
 ## **Usage**
 
 ### **1. Export ONNX Models**
