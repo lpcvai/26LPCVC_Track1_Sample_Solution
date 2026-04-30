@@ -63,13 +63,13 @@ pip install --build-constraint build-constraints.txt -r requirements.txt
 Execute the script to export the encoders as ONNX models:
 
 ```bash
-python export_onnx.py
+python src/export_onnx.py
 ```
 
 ### **2. Compile and Profile**
 
 ```bash
-python compile_and_profile.py
+python src/compile_and_profile.py
 ```
 
 This script will:
