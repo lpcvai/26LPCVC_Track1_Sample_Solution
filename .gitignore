@@ -2,6 +2,8 @@ exported_onnx/
 dataset/
 ids.txt
 data/coco
+data/annotations
+*.egg-info/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
