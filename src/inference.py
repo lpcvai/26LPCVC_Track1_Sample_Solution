@@ -50,8 +50,6 @@ def evaluate_track1(img_output, txt_output, split: RefCocoSplit, limit=None, k=1
         # print(gt[i])
 
         # Top-K text indices by similarity
-        k = 10
-        # Top-K text indices by similarity
         top_k = np.argsort(-sim_matrix[i])[:k]
 
         # Map to real text IDs
