@@ -14,6 +14,7 @@ This repository contains Python scripts designed to extract, compile, and profil
 2. [Requirements](#requirements)
 3. [Installation](#installation)
 4. [Usage](#usage)
+5. [Citation](#citation)
 
 ---
 
@@ -81,7 +82,7 @@ This script will:
 
 Before running inference, datasets must be uploaded to AI Hub using `upload_dataset.py`. This script handles:
 
-* Formatting images and text data into the structure expected by QAI Hub. (image: (1,3,224,224), txt: (1,77))
+* Formatting images and text data into the structure expected by QAI Hub. Image input shape: `(1, 3, 224, 224)`. Text input shape: `(1, 77)`.
 * Uploading the dataset and returning a dataset ID to be used in inference scripts.
 
 ```bash
@@ -104,3 +105,18 @@ python inference.py
 ```
 
 After completion, the script prints the Recall@10 score for the dataset.
+
+---
+
+## Citation
+
+If you use this sample solution or refer to the IEEE Low-Power Computer Vision Challenge, please cite the challenge as follows:
+
+```bibtex
+@misc{lpcvc,
+  author       = {{IEEE Low Power Computer Vision Challenge Organizing Committee}},
+  title        = {{IEEE Low Power Computer Vision Challenge}},
+  howpublished = {\url{https://lpcv.ai/}},
+  note         = {Annual competition series on low power computer vision}
+}
+```
