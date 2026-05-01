@@ -82,7 +82,7 @@ txt_id = compile_model(
     input_specs={"text": ((1, 77), "int64")}
 )
 
-JOB_IDS["text", "compiled_id"] = img_id
+JOB_IDS["text", "compiled_id"] = txt_id
 
 print(f"Image compilation job ID: {img_id}")
 print(f"Text compilation job ID: {txt_id}")
