@@ -74,6 +74,7 @@ text_encoder.eval()
 image_onnx_path = os.path.join(ONNX_DIR, "image_encoder.onnx")
 print(f"\nExporting Image Encoder to {image_onnx_path}...")
 
+# noinspection PyTypeChecker
 torch.onnx.export(
     image_encoder,
     DUMMY_IMAGE_INPUT,
@@ -95,6 +96,7 @@ torch.onnx.export(
 text_onnx_path = os.path.join(ONNX_DIR, "text_encoder.onnx")
 print(f"\nExporting Text Encoder to {text_onnx_path}...")
 
+# noinspection PyTypeChecker
 torch.onnx.export(
     text_encoder,
     DUMMY_TEXT_INPUT,

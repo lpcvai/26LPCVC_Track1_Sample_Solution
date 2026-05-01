@@ -4,6 +4,7 @@ ids.txt
 data/coco
 data/annotations
 *.egg-info/
+job_ids.json
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -28,7 +29,6 @@ sdist/
 var/
 wheels/
 share/python-wheels/
-*.egg-info/
 .installed.cfg
 *.egg
 MANIFEST

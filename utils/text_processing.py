@@ -26,7 +26,9 @@ for prompt in prompts:
     tokenized_texts.append(tokens.numpy())  # convert to numpy array
 
 # Example: check first element
+# noinspection PyTypeHints
 print(tokenized_texts[0].shape)  # (1, 77)
+# noinspection PyTypeHints
 print(tokenized_texts[0].dtype)  # int32
 
 # Optional: check total number of prompts
