@@ -2,6 +2,7 @@ import numpy as np
 import qai_hub
 from sklearn.metrics.pairwise import cosine_similarity
 
+from constants import SPLIT, LIMIT
 from utils.ground_truth import get_ground_truth
 from utils.refcoco_utils import RefCocoSplit
 
@@ -19,7 +20,7 @@ def run_inference(model, device, input_dataset, job_name=None):
     return inference_job.job_id
 
 
-def evaluate_track1(img_output, txt_output, split: RefCocoSplit, k=10):
+def evaluate_track1(img_output, txt_output, split: RefCocoSplit, limit=None, k=10):
     """
     Compute Recall@K between image and text embeddings using HF RefCOCO annotations.
     """
@@ -35,7 +36,7 @@ def evaluate_track1(img_output, txt_output, split: RefCocoSplit, k=10):
     # Now similarity will work
     sim_matrix = cosine_similarity(img_embeds, txt_embeds)
 
-    txt_id, gt = get_ground_truth(split)
+    txt_id, gt = get_ground_truth(split, limit=limit)
 
     assert len(img_embeds) == len(gt), (len(img_embeds), len(gt))
     assert len(txt_embeds) == len(txt_id), (len(txt_embeds), len(txt_id))
@@ -47,7 +48,6 @@ def evaluate_track1(img_output, txt_output, split: RefCocoSplit, k=10):
 
         # print(txt_id[i])
         # print(gt[i])
-        txt_id, gt = get_ground_truth(split)
 
         # Top-K text indices by similarity
         k = 10
@@ -75,12 +75,12 @@ device = qai_hub.Device("XR2 Gen 2 (Proxy)")
 # TODO: Define tasks with their corresponding compiled job IDs and dataset IDs
 tasks = {
     "text": {
-        "compiled_id": "",
-        "dataset_id": ""
+        "compiled_id": "jp1qzqvkg",
+        "dataset_id": "d7g184wo7"
     },
     "image": {
-        "compiled_id": "",
-        "dataset_id": ""
+        "compiled_id": "jg99n9xqg",
+        "dataset_id": "d2reqolo7"
     }
 }
 
@@ -102,12 +102,11 @@ for task_name, info in tasks.items():
 outputs = {}
 
 for task_name, inference_job in inference_jobs.items():
-    inference_output = inference_job.download_output_data() # waits here
+    inference_output = inference_job.download_output_data()  # waits here
     outputs[task_name] = inference_output["output_0"]
-
 
 text_output = outputs["text"]
 image_output = outputs["image"]
 
-result = evaluate_track1(image_output, text_output, RefCocoSplit.TEST)
+result = evaluate_track1(image_output, text_output, SPLIT, limit=LIMIT)
 print(result)

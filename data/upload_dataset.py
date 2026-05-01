@@ -1,20 +1,19 @@
-from pathlib import Path
 from itertools import chain
+from pathlib import Path
 
-from transformers import CLIPTokenizer
-import qai_hub
 import numpy as np
+import qai_hub
 import torch
+from transformers import CLIPTokenizer
 
+from constants import SPLIT, LIMIT
 from utils.img_utils import load_images
-from utils.refcoco_utils import RefCocoSplit
 from utils.text_utils import load_annotations
 
-SPLIT = RefCocoSplit.TEST
 DATA_FOLDER = Path("data")
 
 # Process images
-input_data = load_images(DATA_FOLDER, SPLIT)
+input_data = load_images(DATA_FOLDER, SPLIT, limit=LIMIT)
 print(len(input_data))
 
 # Check dataset properties
@@ -26,7 +25,7 @@ if input_data:
 # Upload dataset
 print(qai_hub.upload_dataset({"image": input_data}, name="image_dataset"))
 
-dataset = load_annotations(RefCocoSplit.VAL)
+dataset = load_annotations(SPLIT, limit=LIMIT)
 prompts = sorted(set(chain.from_iterable(dataset["captions"])))
 
 # Load CLIP tokenizer

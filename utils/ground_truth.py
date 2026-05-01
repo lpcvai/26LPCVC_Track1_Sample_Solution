@@ -6,9 +6,9 @@ from utils.text_utils import load_annotations
 
 
 # function currently doesn't work with split=None
-def get_ground_truth(split: RefCocoSplit):
+def get_ground_truth(split: RefCocoSplit, limit=None):
     """Loads the ground truth annotations."""
-    dataset = load_annotations(split)
+    dataset = load_annotations(split, limit=limit)
     dataset.sort("ann_id")
 
     captions = sorted(set(chain.from_iterable(dataset["captions"])))
