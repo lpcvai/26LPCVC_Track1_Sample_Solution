@@ -1,7 +1,9 @@
+import os
 from enum import StrEnum
 
 from datasets import load_dataset, DatasetDict
 
+os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 
 class RefCocoSplit(StrEnum):
     """
