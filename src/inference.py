@@ -4,6 +4,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 
 from constants import SPLIT, LIMIT
 from utils.ground_truth import get_ground_truth
+from utils.job_utils import JOB_IDS
 from utils.refcoco_utils import RefCocoSplit
 
 
@@ -69,22 +70,10 @@ def evaluate_track1(img_output, txt_output, split: RefCocoSplit, limit=None, k=1
 #Define target device
 device = qai_hub.Device("XR2 Gen 2 (Proxy)")
 
-# TODO: Automate this :/
-# TODO: Define tasks with their corresponding compiled job IDs and dataset IDs
-tasks = {
-    "text": {
-        "compiled_id": "jp1qzqvkg",
-        "dataset_id": "d7g184wo7"
-    },
-    "image": {
-        "compiled_id": "jg99n9xqg",
-        "dataset_id": "d2reqolo7"
-    }
-}
 
 inference_jobs = {}
 
-for task_name, info in tasks.items():
+for task_name, info in JOB_IDS:
     compiled_id = info["compiled_id"]
     input_dataset = qai_hub.get_dataset(info["dataset_id"])
 

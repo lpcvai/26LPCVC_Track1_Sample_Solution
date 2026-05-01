@@ -8,6 +8,7 @@ from transformers import CLIPTokenizer
 
 from constants import SPLIT, LIMIT
 from utils.img_utils import load_images
+from utils.job_utils import JOB_IDS
 from utils.text_utils import load_annotations
 
 DATA_FOLDER = Path("data")
@@ -23,7 +24,9 @@ if input_data:
     assert input_data[0].shape == (1, 3, 224, 224)
 
 # Upload dataset
-print(qai_hub.upload_dataset({"image": input_data}, name="image_dataset"))
+dat = qai_hub.upload_dataset({"image": input_data}, name="image_dataset")
+JOB_IDS["image", "dataset_id"] = dat.dataset_id
+print(dat)
 
 dataset = load_annotations(SPLIT, limit=LIMIT)
 prompts = sorted(set(chain.from_iterable(dataset["captions"])))
@@ -49,4 +52,6 @@ print(tokenized_texts[0].dtype)  # int32
 assert tokenized_texts[0].shape == (1, 77)
 assert tokenized_texts[0].dtype == np.int32
 
-print(qai_hub.upload_dataset({"text": tokenized_texts}, name="text_dataset"))
+dat = qai_hub.upload_dataset({"text": tokenized_texts}, name="text_dataset")
+JOB_IDS["text", "dataset_id"] = dat.dataset_id
+print(dat)
