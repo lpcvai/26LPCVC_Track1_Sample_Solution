@@ -1,5 +1,4 @@
 import argparse
-import configparser
 import io
 import os
 import urllib.request
@@ -7,12 +6,13 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import numpy as np
-import torch
 import open_clip
-from timm.utils import reparameterize_model
-from datasets import load_dataset
+import torch
 from PIL import Image
+from datasets import load_dataset
+from timm.utils import reparameterize_model
 from tqdm import tqdm
+
 from utils import RESULTS_PATH, MODELS, BATCH_SIZE, NUM_DOWNLOAD_WORKERS
 
 parser = argparse.ArgumentParser()

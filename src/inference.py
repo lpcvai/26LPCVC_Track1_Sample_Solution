@@ -1,9 +1,9 @@
 import argparse
-import os
+
 import numpy as np
 import qai_hub
 
-from utils import K, CAPTIONS_PER_IMAGE
+from utils import CAPTIONS_PER_IMAGE
 
 
 def first_output(job):

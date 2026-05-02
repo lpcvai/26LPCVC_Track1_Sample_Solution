@@ -1,9 +1,11 @@
 import argparse
 import os
-import torch
+
 import open_clip
+import torch
 from timm.utils import reparameterize_model
-from utils import MODELS, RESULTS_PATH, NUM_IMAGE_SAMPLES, CAPTIONS_PER_IMAGE, NUM_TEXT_SAMPLES, K
+
+from utils import MODELS, RESULTS_PATH, NUM_IMAGE_SAMPLES, NUM_TEXT_SAMPLES, K
 
 parser = argparse.ArgumentParser()
 group = parser.add_mutually_exclusive_group(required=True)

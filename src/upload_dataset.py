@@ -1,16 +1,15 @@
 import argparse
 import io
-import os
 import urllib.request
+
 import numpy as np
-import torch
 import open_clip
 import qai_hub
-
-from datasets import load_dataset
 from PIL import Image
+from datasets import load_dataset
 from tqdm import tqdm
-from utils import MODELS, NUM_IMAGE_SAMPLES, CAPTIONS_PER_IMAGE, RESULTS_PATH, NUM_TEXT_SAMPLES, JOB_IDS
+
+from utils import MODELS, NUM_IMAGE_SAMPLES, CAPTIONS_PER_IMAGE, NUM_TEXT_SAMPLES, JOB_IDS
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--model", choices=MODELS.keys(), default="MobileCLIP2-S0", help="Model to target")
