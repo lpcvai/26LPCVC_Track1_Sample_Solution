@@ -1,0 +1,14 @@
+Note that our compilation to inference pipeline is different from traditional cosine
+
+
+In traditional cosine, we run our image and text encoders, get embeddings, and package them into a cosine calculator. Simple!
+
+Actually: claude explains this quite nicely.
+
+In the cosine path, the TopKWrapper ONNX model is exported and compiled at the start — before any inference runs — because it has no fixed data baked into it. It's a pure computation graph that takes both embedding matrices as runtime inputs. So the compile job can be submitted upfront alongside the encoder compile jobs, and then image and text encoder inference can be submitted together and awaited together before the topk job runs.                            
+                                                            
+In the FAISS path, the FAISSIndexWrapper can't be compiled upfront because the text embeddings are baked into the model as constant weights. That means you don't know what to export until you actually have the text embeddings in hand. So the text encoder inference must complete first, the embeddings get
+  downloaded and normalized, and only then can the FAISS model be constructed, exported to ONNX, and compiled. Image encoder inference is only submitted after that compilation completes, since the compiled FAISS model needs to be ready before you can submit the final FAISS inference job that takes the image embeddings as input.
+
+In short: cosine is a stateless computation graph compiled once up front, while FAISS bakes state (the text index) into the model weights, which forces asequential dependency on the text encoder inference completing before compilation can happen.
+

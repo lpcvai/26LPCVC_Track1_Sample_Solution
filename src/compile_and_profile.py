@@ -33,8 +33,8 @@ group.add_argument("--all", action="store_true", help="Compile and profile all m
 parser.add_argument("--image-dataset-id", required=True, help="QAI Hub dataset ID for images (from upload_dataset.py)")
 parser.add_argument("--text-dataset-id",  required=True, help="QAI Hub dataset ID for texts  (from upload_dataset.py)")
 parser.add_argument("--device", default="XR2 Gen 2 (Proxy)", help="QAI Hub target device")
-parser.add_argument("--topk", choices=["device", "faiss"], default="device",
-                    help="How to compute top-k: on the QAI device (default) or via FAISS on host")
+parser.add_argument("--topk", choices=["cosine", "faiss"], default="cosine",
+                    help="How to compute top-k on the QAS device: cosine(default) or via FAISS")
 parser.add_argument("--faiss-compute-unit", choices=["all", "npu", "gpu", "cpu"], default="all",
                     help="Compute unit for FAISS compile and inference jobs (only applies with --topk faiss)")
 parser.add_argument("--profile", action="store_true", help="Submit profile jobs after recall is computed")
@@ -158,7 +158,7 @@ for model_name in targets:
         # ── FAISS path: run text encoder first to build the on-device index ───
         print("  Running text encoder inference to build FAISS index...")
         txt_inf_job = qai_hub.submit_inference_job(model=txt_compiled, device=target_device, inputs=text_dataset)
-        text_embs   = np.concatenate(txt_inf_job.download_output_data()["text_embedding"], axis=0)
+        text_embs   = np.concatenate(first_output(txt_inf_job), axis=0)
         text_embs   = text_embs / np.linalg.norm(text_embs, axis=1, keepdims=True)
 
         # Bake the text embeddings into a FAISSIndexWrapper and compile it —
