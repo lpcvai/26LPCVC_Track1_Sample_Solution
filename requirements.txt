@@ -1,0 +1,11 @@
+clip-benchmark>=1.4.0
+datasets>=2.21.0
+open-clip-torch>=2.20.0
+timm>=0.9.5
+torch>=2.8.0
+torchvision>=0.23.0
+# Added by Ben
+qai-hub
+onnxscript
+faiss-gpu
+onnxsim

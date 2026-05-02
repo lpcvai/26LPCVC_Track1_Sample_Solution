@@ -1,0 +1,15 @@
+Ideally, run on all models
+  - baseline (no faiss)
+  - faiss w cpu
+  - faiss w gpu
+
+Play around with truncate_64bit_io??
+
+
+High priority: 
+  - batch images to separate runs...that sounds like pain
+  - actually run everything
+  - get ta feedback tue
+
+Low priority: 
+  - make it so we don't have to pass qai codes as arguments
