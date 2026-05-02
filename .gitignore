@@ -29,6 +29,8 @@ share/python-wheels/
 .vscode/
 MANIFEST
 exported_onnx/
+job_ids.json
+results
 
 # PyInstaller
 #  Usually these files are written by a python script from a template
