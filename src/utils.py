@@ -7,18 +7,17 @@ import os
 import json
 from pathlib import Path
 
-
 MODELS = {
-    "MobileCLIP-S1":  "datacompdr",
+    "MobileCLIP-S1": "datacompdr",
     "MobileCLIP2-S0": "dfndr2b",
     "MobileCLIP2-S2": "dfndr2b",
-    "MobileCLIP2-B":  "dfndr2b",
+    "MobileCLIP2-B": "dfndr2b",
     "MobileCLIP2-S3": "dfndr2b",
 }
 
-NUM_IMAGE_SAMPLES  = 500
+NUM_IMAGE_SAMPLES = 500
 CAPTIONS_PER_IMAGE = 5
-NUM_TEXT_SAMPLES   = NUM_IMAGE_SAMPLES * CAPTIONS_PER_IMAGE
+NUM_TEXT_SAMPLES = NUM_IMAGE_SAMPLES * CAPTIONS_PER_IMAGE
 K = 10
 
 # Used in baseline scripts, not in QAI exports
@@ -33,6 +32,7 @@ os.chdir(os.path.join(_src_dir, "..") if _src_dir else "..")
 config = configparser.ConfigParser()
 config.read("config.ini")
 RESULTS_PATH = config["DEFAULT"]["results_path"]
+
 
 class JobIds:
     """
@@ -93,5 +93,3 @@ class JobIds:
 
 
 JOB_IDS = JobIds("job_ids.json")
-
-
