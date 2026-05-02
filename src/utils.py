@@ -47,7 +47,7 @@ class JobIds:
 
     def loader(self):
         """
-        Loads JobIds data from json file
+        Loads JobIds data from JSON file
         Creates and add null values if the file does not exist
         """
         if self.path.exists():
