@@ -54,7 +54,7 @@ print(image_dataset)
 print(f"Tokenizing {NUM_TEXT_SAMPLES} captions...")
 tokenized_texts = []
 for example in tqdm(samples, desc="texts"):
-    for caption in example["sentences"]:
+    for caption in example["sentences"][:CAPTIONS_PER_IMAGE]:
         tokens = tokenizer([caption])  # [1, context_length], int64
         tokenized_texts.append(tokens.numpy().astype(np.int32))
 
