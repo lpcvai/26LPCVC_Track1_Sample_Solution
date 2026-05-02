@@ -12,11 +12,13 @@ def first_output(job):
 
 
 parser = argparse.ArgumentParser(description="Re-run inference on already-compiled MobileCLIP models")
-parser.add_argument("--img-compiled-id",  required=True,  help="Compile job ID for the image encoder")
-parser.add_argument("--txt-compiled-id",  default=None,   help="Compile job ID for the text encoder (required for --topk device)")
-parser.add_argument("--topk-compiled-id", required=True,  help="Compile job ID for the top-k model (topk_retrieval or faiss_index)")
-parser.add_argument("--image-dataset-id", required=True,  help="QAI Hub dataset ID for images")
-parser.add_argument("--text-dataset-id",  default=None,   help="QAI Hub dataset ID for texts (required for --topk device)")
+parser.add_argument("--img-compiled-id", required=True, help="Compile job ID for the image encoder")
+parser.add_argument("--txt-compiled-id", default=None,
+                    help="Compile job ID for the text encoder (required for --topk device)")
+parser.add_argument("--topk-compiled-id", required=True,
+                    help="Compile job ID for the top-k model (topk_retrieval or faiss_index)")
+parser.add_argument("--image-dataset-id", required=True, help="QAI Hub dataset ID for images")
+parser.add_argument("--text-dataset-id", default=None, help="QAI Hub dataset ID for texts (required for --topk device)")
 parser.add_argument("--topk", choices=["device", "faiss"], default="device",
                     help="Top-k method used when the model was compiled")
 parser.add_argument("--faiss-compute-unit", choices=["all", "npu", "gpu", "cpu"], default="all",
@@ -31,7 +33,7 @@ target_device = qai_hub.Device(args.device)
 image_dataset = qai_hub.get_dataset(args.image_dataset_id)
 
 # Retrieve compiled models from their job IDs
-img_compiled  = qai_hub.get_job(args.img_compiled_id).get_target_model()
+img_compiled = qai_hub.get_job(args.img_compiled_id).get_target_model()
 topk_compiled = qai_hub.get_job(args.topk_compiled_id).get_target_model()
 
 # ── Encoder inference ──────────────────────────────────────────────────────────
@@ -61,7 +63,7 @@ image_embs = image_embs / np.linalg.norm(image_embs, axis=1, keepdims=True)
 if args.topk == "device":
     topk_dataset = qai_hub.upload_dataset({
         "image_embs": [image_embs],
-        "text_embs":  [text_embs],
+        "text_embs": [text_embs],
     })
 else:
     # faiss: text embeddings are baked into the compiled model; only image
@@ -87,4 +89,4 @@ for i in range(N):
     gt = set(range(i * CAPTIONS_PER_IMAGE, (i + 1) * CAPTIONS_PER_IMAGE))
     recalls.append(len(gt & set(topk_indices[i].tolist())) / CAPTIONS_PER_IMAGE)
 recall_at_10 = float(np.mean(recalls))
-print(f"Recall@10: {recall_at_10:.4f}  ({recall_at_10*100:.2f}%)")
+print(f"Recall@10: {recall_at_10:.4f}  ({recall_at_10 * 100:.2f}%)")
