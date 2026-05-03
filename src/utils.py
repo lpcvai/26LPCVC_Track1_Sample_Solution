@@ -36,7 +36,7 @@ RESULTS_PATH = config["DEFAULT"]["results_path"]
 
 class JobIds:
     """
-    Class to manage JobIds data and dynamically update the corresponding json file
+    Class to manage JobIds data and dynamically update the corresponding JSON file
     """
     path: Path
     data: dict
@@ -52,12 +52,14 @@ class JobIds:
         """
         if self.path.exists():
             with self.path.open("r") as f:
-                self.data = json.load(f)
+                self.data = json.load(f) or {}
                 return
         self.data = {
-            "text": {"compiled_id": None, "dataset_id": None},
-            "image": {"compiled_id": None, "dataset_id": None}
+            "text": {"compiled_id": None, "dataset_id": None, },
+            "image": {"compiled_id": None, "dataset_id": None, },
+            "topk": {"compiled_id": None}
         }
+        # Ensure a valid initial file exists.
         self.save()
 
     def save(self):
@@ -73,6 +75,8 @@ class JobIds:
 
     def __setitem__(self, key, value):
         outer, inner = key
+        if outer not in self.data or not isinstance(self.data.get(outer), dict):
+            self.data[outer] = {}
         self.data[outer][inner] = value
         self.save()
 

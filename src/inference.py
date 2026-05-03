@@ -3,7 +3,7 @@ import argparse
 import numpy as np
 import qai_hub
 
-from utils import CAPTIONS_PER_IMAGE
+from utils import CAPTIONS_PER_IMAGE, JOB_IDS
 
 
 def first_output(job):
@@ -12,13 +12,18 @@ def first_output(job):
 
 
 parser = argparse.ArgumentParser(description="Re-run inference on already-compiled MobileCLIP models")
-parser.add_argument("--img-compiled-id", required=True, help="Compile job ID for the image encoder")
-parser.add_argument("--txt-compiled-id", default=None,
-                    help="Compile job ID for the text encoder (required for --topk device)")
-parser.add_argument("--topk-compiled-id", required=True,
-                    help="Compile job ID for the top-k model (topk_retrieval or faiss_index)")
-parser.add_argument("--image-dataset-id", required=True, help="QAI Hub dataset ID for images")
-parser.add_argument("--text-dataset-id", default=None, help="QAI Hub dataset ID for texts (required for --topk device)")
+parser.add_argument("--img-compiled-id", default=JOB_IDS["image", "compiled_id"],
+                    help="Compile job ID for the image encoder. If omitted, uses job_ids.json.")
+parser.add_argument("--txt-compiled-id", default=JOB_IDS["text", "compiled_id"],
+                    help="Compile job ID for the text encoder (required for --topk device). "
+                         "If omitted, uses job_ids.json.")
+parser.add_argument("--topk-compiled-id", default=JOB_IDS["topk", "compiled_id"],
+                    help="Compile job ID for the top-k model (topk_retrieval or faiss_index). "
+                         "If omitted, uses job_ids.json.")
+parser.add_argument("--image-dataset-id", default=JOB_IDS["image", "dataset_id"],
+                    help="QAI Hub dataset ID for images. If omitted, uses job_ids.json.")
+parser.add_argument("--text-dataset-id", default=JOB_IDS["text", "dataset_id"],
+                    help="QAI Hub dataset ID for texts (required for --topk device). If omitted, uses job_ids.json.")
 parser.add_argument("--topk", choices=["device", "faiss"], default="device",
                     help="Top-k method used when the model was compiled")
 parser.add_argument("--faiss-compute-unit", choices=["all", "npu", "gpu", "cpu"], default="all",
@@ -26,8 +31,24 @@ parser.add_argument("--faiss-compute-unit", choices=["all", "npu", "gpu", "cpu"]
 parser.add_argument("--device", default="XR2 Gen 2 (Proxy)", help="QAI Hub target device")
 args = parser.parse_args()
 
-if args.topk == "device" and (args.txt_compiled_id is None or args.text_dataset_id is None):
-    parser.error("--topk device requires --txt-compiled-id and --text-dataset-id")
+missing = []
+if args.img_compiled_id is None:
+    missing.append("--img-compiled-id")
+if args.topk_compiled_id is None:
+    missing.append("--topk-compiled-id")
+if args.image_dataset_id is None:
+    missing.append("--image-dataset-id")
+if args.topk == "device":
+    if args.txt_compiled_id is None:
+        missing.append("--txt-compiled-id")
+    if args.text_dataset_id is None:
+        missing.append("--text-dataset-id")
+if missing:
+    parser.error(
+        "Missing required parameters (and no defaults in job_ids.json): "
+        + ", ".join(missing)
+        + "."
+    )
 
 target_device = qai_hub.Device(args.device)
 image_dataset = qai_hub.get_dataset(args.image_dataset_id)

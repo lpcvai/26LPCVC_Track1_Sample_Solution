@@ -6,7 +6,7 @@ import onnx
 import qai_hub
 import torch
 
-from utils import RESULTS_PATH, MODELS, NUM_IMAGE_SAMPLES, CAPTIONS_PER_IMAGE, K
+from utils import RESULTS_PATH, MODELS, NUM_IMAGE_SAMPLES, CAPTIONS_PER_IMAGE, K, JOB_IDS
 
 # ONNX element type codes → QAI Hub dtype strings
 ONNX_ELEM_TYPE = {1: "float32", 6: "int32", 7: "int64"}
@@ -31,8 +31,12 @@ parser = argparse.ArgumentParser()
 group = parser.add_mutually_exclusive_group(required=True)
 group.add_argument("--model", choices=MODELS.keys(), help="Single model to compile and profile")
 group.add_argument("--all", action="store_true", help="Compile and profile all models")
-parser.add_argument("--image-dataset-id", required=True, help="QAI Hub dataset ID for images (from upload_dataset.py)")
-parser.add_argument("--text-dataset-id", required=True, help="QAI Hub dataset ID for texts  (from upload_dataset.py)")
+parser.add_argument("--image-dataset-id", default=JOB_IDS["image", "dataset_id"],
+                    help="QAI Hub dataset ID for images (from upload_dataset.py). "
+                         "If omitted, uses job_ids.json.")
+parser.add_argument("--text-dataset-id", default=JOB_IDS["text", "dataset_id"],
+                    help="QAI Hub dataset ID for texts  (from upload_dataset.py). "
+                         "If omitted, uses job_ids.json.")
 parser.add_argument("--device", default="XR2 Gen 2 (Proxy)", help="QAI Hub target device")
 parser.add_argument("--topk", choices=["device", "faiss"], default="device",
                     help="How to compute top-k: on the QAI device (default) or via FAISS on host")
@@ -74,6 +78,12 @@ def load_and_validate(path, label):
         return None
     return model
 
+
+if args.image_dataset_id is None or args.text_dataset_id is None:
+    raise SystemExit(
+        "Missing dataset IDs. Run upload_dataset.py first (it updates job_ids.json), "
+        "or pass --image-dataset-id/--text-dataset-id."
+    )
 
 target_device = qai_hub.Device(args.device)
 image_dataset = qai_hub.get_dataset(args.image_dataset_id)
@@ -119,6 +129,9 @@ for model_name in targets:
         input_specs=get_input_specs(onnx_txt),
         options="--target_runtime qnn_dlc",
     )
+    # Persist latest compile job IDs for convenience re-runs (CLI always overrides).
+    JOB_IDS["image", "compiled_id"] = img_compile_job.job_id
+    JOB_IDS["text", "compiled_id"] = txt_compile_job.job_id
     if args.topk == "device":
         topk_compile_job = qai_hub.submit_compile_job(
             model=onnx_topk,
@@ -126,6 +139,7 @@ for model_name in targets:
             input_specs=get_input_specs(onnx_topk),
             options="--target_runtime qnn_dlc",
         )
+        JOB_IDS["topk", "compiled_id"] = topk_compile_job.job_id
         print(
             f"  Compile job IDs — image: {img_compile_job.job_id}, text: {txt_compile_job.job_id}, topk: {topk_compile_job.job_id}")
     else:
@@ -193,6 +207,7 @@ for model_name in targets:
             input_specs=get_input_specs(onnx_faiss),
             options=f"--target_runtime qnn_dlc --compute_unit {args.faiss_compute_unit}",
         )
+        JOB_IDS["topk", "compiled_id"] = faiss_compile_job.job_id
         print(f"  FAISS compile job ID: {faiss_compile_job.job_id}")
         faiss_compiled = faiss_compile_job.get_target_model()
 
