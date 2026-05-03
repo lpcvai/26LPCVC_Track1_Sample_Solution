@@ -111,6 +111,7 @@ def compile_model(
     text_calib_dataset,
     topk: str,
     faiss_compute_unit: str,
+    persist_job_ids: bool = True,
 ):
     """Submit compile jobs and persist compile job IDs to job_ids.json.
 
@@ -132,8 +133,9 @@ def compile_model(
         options=compile_options,
         calibration_data=text_calib_dataset,
     )
-    JOB_IDS["image", "compiled_id"] = image_compile_job.job_id
-    JOB_IDS["text", "compiled_id"] = text_compile_job.job_id
+    if persist_job_ids:
+        JOB_IDS["image", "compiled_id"] = image_compile_job.job_id
+        JOB_IDS["text", "compiled_id"] = text_compile_job.job_id
 
     topk_compile_job = None
     if topk == "cosine":
@@ -143,7 +145,8 @@ def compile_model(
             input_specs=get_input_specs(onnx_topk),
             options=compile_options,
         )
-        JOB_IDS["topk", "compiled_id"] = topk_compile_job.job_id
+        if persist_job_ids:
+            JOB_IDS["topk", "compiled_id"] = topk_compile_job.job_id
         print(f"  Compile job IDs — image: {image_compile_job.job_id}, text: {text_compile_job.job_id}, topk: {topk_compile_job.job_id}")
     else:
         print(f"  Compile job IDs — image: {image_compile_job.job_id}, text: {text_compile_job.job_id}")
@@ -162,6 +165,7 @@ def compile_faiss_index_model(
     text_dataset,
     onnx_dir: str,
     faiss_compute_unit: str,
+    persist_job_ids: bool = True,
 ):
     """Build a FAISS index model by running text inference, baking embeddings, and compiling."""
     if text_compiled is None or text_dataset is None:
@@ -199,14 +203,15 @@ def compile_faiss_index_model(
         input_specs=get_input_specs(onnx_faiss),
         options=f"--target_runtime qnn_dlc --compute_unit {faiss_compute_unit}",
     )
-    JOB_IDS["topk", "compiled_id"] = faiss_compile_job.job_id
+    if persist_job_ids:
+        JOB_IDS["topk", "compiled_id"] = faiss_compile_job.job_id
     print(f"  FAISS compile job ID: {faiss_compile_job.job_id}")
     return {
         "topk_compiled_id": faiss_compile_job.job_id,
     }
 
 
-def run_pipeline(args):
+def run_pipeline(args, *, persist_job_ids: bool = True):
     parser = build_arg_parser()
     if args.quantize and (args.image_calibration_id is None or args.text_calibration_id is None):
         parser.error("--quantize requires --image-calibration-id and --text-calibration-id")
@@ -260,6 +265,7 @@ def run_pipeline(args):
                 text_calib_dataset=text_calib_dataset,
                 topk=args.topk,
                 faiss_compute_unit=args.faiss_compute_unit,
+                persist_job_ids=persist_job_ids,
             ),
         }
 

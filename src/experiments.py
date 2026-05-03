@@ -50,6 +50,27 @@ def _iter_topk_modes(topk_arg: str):
         return ["cosine", "faiss"]
     return [topk_arg]
 
+def _job_ids_snapshot_for_run(*, cj: dict, image_dataset_id: str, text_dataset_id: str, topk_compiled_id: str | None):
+    """
+    Build a stable per-run snapshot of the exact compile job IDs used.
+
+    Don't read from JOB_IDS here: experiments submits many compiles and JOB_IDS is a
+    mutable global backed by job_ids.json, so it will reflect whichever compile ran last.
+    """
+    return {
+        "text": {
+            "compiled_id": cj.get("text_compiled_id"),
+            "dataset_id": text_dataset_id,
+        },
+        "image": {
+            "compiled_id": cj.get("image_compiled_id"),
+            "dataset_id": image_dataset_id,
+        },
+        "topk": {
+            "compiled_id": topk_compiled_id,
+        },
+    }
+
 
 def main(argv=None):
     parser = build_arg_parser()
@@ -93,7 +114,9 @@ def main(argv=None):
             # NOTE: Even though inference must wait for compile completion, submitting all compile jobs
             # up-front avoids serializing compiles across runs.
             try:
-                compile_jobs = compile_and_profile.run_pipeline(run_args) or {}
+                # Avoid mutating job_ids.json during experiments. We want each run to carry
+                # its own compile job IDs, not "whatever was last written".
+                compile_jobs = compile_and_profile.run_pipeline(run_args, persist_job_ids=False) or {}
             except Exception as e:
                 results["runs"].append({
                     "model": model_name,
@@ -147,6 +170,7 @@ def main(argv=None):
                 text_dataset=text_dataset,
                 onnx_dir=cj["onnx_dir"],
                 faiss_compute_unit=args.faiss_compute_unit,
+                persist_job_ids=False,
             )
             if not faiss_compile or not faiss_compile.get("topk_compiled_id"):
                 raise RuntimeError("FAISS index compile did not return a topk_compiled_id")
@@ -160,7 +184,7 @@ def main(argv=None):
                 topk_compiled_id=topk_compiled_id,
                 image_dataset_id=image_dataset_id,
             )
-            return recall
+            return recall, topk_compiled_id
 
         # cosine
         recall = run_inference(
@@ -173,7 +197,7 @@ def main(argv=None):
             text_compiled_id=cj["text_compiled_id"],
             text_dataset_id=text_dataset_id,
         )
-        return recall
+        return recall, cj.get("topk_compiled_id")
 
     # A modest worker count avoids hammering the Hub API/client while still preventing
     # "wait for compile then infer" from becoming serialized across many runs.
@@ -184,8 +208,9 @@ def main(argv=None):
             run = future_to_run[fut]
             model_name = run["model"]
             topk_mode = run["topk"]
+            cj = run["compile_job_ids"]
             try:
-                recall_at_10 = fut.result()
+                recall_at_10, topk_compiled_id = fut.result()
             except Exception as e:
                 results["runs"].append({
                     "model": model_name,
@@ -194,7 +219,12 @@ def main(argv=None):
                     "quantize_type": args.quantize_type,
                     "faiss_compute_unit": args.faiss_compute_unit,
                     "recall_at_10": None,
-                    "job_ids_snapshot": copy.deepcopy(JOB_IDS.data),
+                    "job_ids_snapshot": _job_ids_snapshot_for_run(
+                        cj=cj,
+                        image_dataset_id=image_dataset_id,
+                        text_dataset_id=text_dataset_id,
+                        topk_compiled_id=cj.get("topk_compiled_id"),
+                    ),
                     "error": f"{type(e).__name__}: {e}",
                 })
                 print(f"  ERROR: {model_name} {topk_mode}: {type(e).__name__}: {e}")
@@ -207,7 +237,12 @@ def main(argv=None):
                 "quantize_type": args.quantize_type,
                 "faiss_compute_unit": args.faiss_compute_unit,
                 "recall_at_10": recall_at_10,
-                "job_ids_snapshot": copy.deepcopy(JOB_IDS.data),
+                "job_ids_snapshot": _job_ids_snapshot_for_run(
+                    cj=cj,
+                    image_dataset_id=image_dataset_id,
+                    text_dataset_id=text_dataset_id,
+                    topk_compiled_id=topk_compiled_id,
+                ),
             })
 
     out_path = args.output
