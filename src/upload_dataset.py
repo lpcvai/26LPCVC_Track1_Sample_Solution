@@ -5,6 +5,8 @@ import urllib.request
 import numpy as np
 import open_clip
 import qai_hub
+import torch
+import torch.nn.functional as F
 from PIL import Image
 from datasets import load_dataset
 from tqdm import tqdm
@@ -35,6 +37,15 @@ def upload_datasets(model_name: str):
         with urllib.request.urlopen(example["url"], timeout=10) as resp:
             img = Image.open(io.BytesIO(resp.read())).convert("RGB")
         tensor = preprocess(img)  # [3, H, W], float32
+        # Some model variants use a different default input resolution (e.g., 256).
+        # For this project, we force everything to 224x224 to match the compiled models.
+        if tensor.shape[-2:] != (224, 224):
+            tensor = F.interpolate(
+                tensor.unsqueeze(0),
+                size=(224, 224),
+                mode="bilinear",
+                align_corners=False,
+            ).squeeze(0)
         input_images.append(tensor.unsqueeze(0).numpy())  # [1, 3, H, W]
 
     print("Uploading image dataset...")
