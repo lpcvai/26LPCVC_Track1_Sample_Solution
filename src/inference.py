@@ -155,7 +155,7 @@ def run_inference(
             progressed = True
         active = still_active
 
-        if not progressed and active:
+        if not progressed and (active or (text_inf_job is not None and text_embs is None)):
             time.sleep(2)
 
     for i in range(len(image_dataset_ids)):

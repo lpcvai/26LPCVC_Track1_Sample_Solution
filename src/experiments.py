@@ -294,6 +294,18 @@ def main(argv=None):
         image_compiled = qai_hub.get_job(cj["image_compiled_id"]).get_target_model()
         text_compiled = qai_hub.get_job(cj["text_compiled_id"]).get_target_model() if (need_cosine or need_faiss) else None
 
+        # Submit text encoder inference early so it can run in parallel with image batches.
+        text_embs = None
+        text_inf_job = None
+        if need_cosine or need_faiss:
+            print(f"Submitting text encoder inference for {model_name}...")
+            text_inf_job = qai_hub.submit_inference_job(
+                model=text_compiled,
+                device=target_device,
+                inputs=text_dataset,
+                name=f"{prefix}{model_name} :: text",
+            )
+
         # Submit image encoder inference in batches (multiple image datasets) to avoid Hub size limits.
         image_embs_parts = []
         pending = list(enumerate(image_dataset_ids))
@@ -318,6 +330,15 @@ def main(argv=None):
                 _submit_one(idx, ds_id)
 
             progressed = False
+
+            # Opportunistically capture completed text embeddings.
+            if text_inf_job is not None and text_embs is None:
+                st = text_inf_job.get_status()
+                if not (st.running or st.pending):
+                    text_embs = np.concatenate(first_output_inference(text_inf_job), axis=0)
+                    text_embs = text_embs / np.linalg.norm(text_embs, axis=1, keepdims=True)
+                    progressed = True
+
             still_active: list[tuple[int, str, qai_hub.InferenceJob]] = []
             for idx, ds_id, job in active:
                 st = job.get_status()
@@ -330,21 +351,14 @@ def main(argv=None):
                 progressed = True
             active = still_active
 
-            if not progressed and active:
+            if not progressed and (active or (text_inf_job is not None and text_embs is None)):
                 time.sleep(2)
 
         for i in range(len(image_dataset_ids)):
             image_embs_parts.append(results_by_idx[i])
 
-        text_embs = None
-        if need_cosine or need_faiss:
-            print(f"Submitting text encoder inference for {model_name}...")
-            text_inf_job = qai_hub.submit_inference_job(
-                model=text_compiled,
-                device=target_device,
-                inputs=text_dataset,
-                name=f"{prefix}{model_name} :: text",
-            )
+        if (need_cosine or need_faiss) and text_embs is None:
+            # If text inference didn't complete during image batching, block now.
             text_embs = np.concatenate(first_output_inference(text_inf_job), axis=0)
             text_embs = text_embs / np.linalg.norm(text_embs, axis=1, keepdims=True)
 
