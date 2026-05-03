@@ -12,9 +12,9 @@ def first_output(job):
 
 
 parser = argparse.ArgumentParser(description="Re-run inference on already-compiled MobileCLIP models")
-parser.add_argument("--img-compiled-id", default=JOB_IDS["image", "compiled_id"],
+parser.add_argument("--image-compiled-id", default=JOB_IDS["image", "compiled_id"],
                     help="Compile job ID for the image encoder. If omitted, uses job_ids.json.")
-parser.add_argument("--txt-compiled-id", default=JOB_IDS["text", "compiled_id"],
+parser.add_argument("--text-compiled-id", default=JOB_IDS["text", "compiled_id"],
                     help="Compile job ID for the text encoder (required for --topk device). "
                          "If omitted, uses job_ids.json.")
 parser.add_argument("--topk-compiled-id", default=JOB_IDS["topk", "compiled_id"],
@@ -24,7 +24,7 @@ parser.add_argument("--image-dataset-id", default=JOB_IDS["image", "dataset_id"]
                     help="QAI Hub dataset ID for images. If omitted, uses job_ids.json.")
 parser.add_argument("--text-dataset-id", default=JOB_IDS["text", "dataset_id"],
                     help="QAI Hub dataset ID for texts (required for --topk device). If omitted, uses job_ids.json.")
-parser.add_argument("--topk", choices=["device", "faiss"], default="device",
+parser.add_argument("--topk", choices=["cosine", "faiss"], default="device",
                     help="Top-k method used when the model was compiled")
 parser.add_argument("--faiss-compute-unit", choices=["all", "npu", "gpu", "cpu"], default="all",
                     help="Compute unit for the FAISS inference job (only applies with --topk faiss)")

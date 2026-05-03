@@ -3,8 +3,8 @@ import os
 
 import numpy as np
 import onnx
-import qai_hub
 import torch
+import qai_hub
 
 from utils import RESULTS_PATH, MODELS, NUM_IMAGE_SAMPLES, CAPTIONS_PER_IMAGE, K, JOB_IDS
 
@@ -38,12 +38,29 @@ parser.add_argument("--text-dataset-id", default=JOB_IDS["text", "dataset_id"],
                     help="QAI Hub dataset ID for texts  (from upload_dataset.py). "
                          "If omitted, uses job_ids.json.")
 parser.add_argument("--device", default="XR2 Gen 2 (Proxy)", help="QAI Hub target device")
-parser.add_argument("--topk", choices=["device", "faiss"], default="device",
-                    help="How to compute top-k: on the QAI device (default) or via FAISS on host")
+parser.add_argument("--topk", choices=["cosine", "faiss"], default="cosine",
+                    help="How to compute top-k on the QAS device: cosine(default) or via FAISS")
 parser.add_argument("--faiss-compute-unit", choices=["all", "npu", "gpu", "cpu"], default="all",
                     help="Compute unit for FAISS compile and inference jobs (only applies with --topk faiss)")
 parser.add_argument("--profile", action="store_true", help="Submit profile jobs after recall is computed")
+parser.add_argument("--quantize", action="store_true", help="Apply post-training quantization during compilation")
+parser.add_argument("--quantize-type", default="int16", choices=["w4a8", "w8a16", "w4a16", "int8", "int16"],
+                    help="Quantization type (only applies with --quantize)")
+parser.add_argument("--image-calibration-id", default=None,
+                    help="QAI Hub dataset ID for image calibration data (from upload_calibration.py)")
+parser.add_argument("--text-calibration-id", default=None,
+                    help="QAI Hub dataset ID for text calibration data (from upload_calibration.py)")
 args = parser.parse_args()
+
+if args.quantize and (args.image_calibration_id is None or args.text_calibration_id is None):
+    parser.error("--quantize requires --image-calibration-id and --text-calibration-id")
+
+compile_options = "--target_runtime qnn_dlc"
+if args.quantize:
+    compile_options += f" --quantize_full_type {args.quantize_type}"
+
+image_calib_dataset = qai_hub.get_dataset(args.image_calibration_id) if args.quantize else None
+text_calib_dataset  = qai_hub.get_dataset(args.text_calibration_id)  if args.quantize else None
 
 targets = MODELS if args.all else {args.model: MODELS[args.model]}
 
@@ -121,13 +138,15 @@ for model_name in targets:
         model=onnx_img,
         device=target_device,
         input_specs=get_input_specs(onnx_img),
-        options="--target_runtime qnn_dlc",
+        options=compile_options,
+        calibration_data=image_calib_dataset,
     )
     txt_compile_job = qai_hub.submit_compile_job(
         model=onnx_txt,
         device=target_device,
         input_specs=get_input_specs(onnx_txt),
-        options="--target_runtime qnn_dlc",
+        options=compile_options,
+        calibration_data=text_calib_dataset,
     )
     # Persist latest compile job IDs for convenience re-runs (CLI always overrides).
     JOB_IDS["image", "compiled_id"] = img_compile_job.job_id
@@ -137,7 +156,7 @@ for model_name in targets:
             model=onnx_topk,
             device=target_device,
             input_specs=get_input_specs(onnx_topk),
-            options="--target_runtime qnn_dlc",
+            options=compile_options,
         )
         JOB_IDS["topk", "compiled_id"] = topk_compile_job.job_id
         print(
@@ -174,7 +193,7 @@ for model_name in targets:
         # ── FAISS path: run text encoder first to build the on-device index ───
         print("  Running text encoder inference to build FAISS index...")
         txt_inf_job = qai_hub.submit_inference_job(model=txt_compiled, device=target_device, inputs=text_dataset)
-        text_embs = np.concatenate(txt_inf_job.download_output_data()["text_embedding"], axis=0)
+        text_embs = np.concatenate(first_output(txt_inf_job), axis=0)
         text_embs = text_embs / np.linalg.norm(text_embs, axis=1, keepdims=True)
 
         # Bake the text embeddings into a FAISSIndexWrapper and compile it —
@@ -205,7 +224,7 @@ for model_name in targets:
             model=onnx_faiss,
             device=target_device,
             input_specs=get_input_specs(onnx_faiss),
-            options=f"--target_runtime qnn_dlc --compute_unit {args.faiss_compute_unit}",
+            options=f"{compile_options} --compute_unit {args.faiss_compute_unit}",
         )
         JOB_IDS["topk", "compiled_id"] = faiss_compile_job.job_id
         print(f"  FAISS compile job ID: {faiss_compile_job.job_id}")
