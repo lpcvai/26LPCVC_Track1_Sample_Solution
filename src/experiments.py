@@ -10,6 +10,7 @@ import compile_and_profile
 import numpy as np
 import qai_hub
 import time
+import qai_hub.public_rest_api as hub_api
 
 from utils import (
     MODELS,
@@ -294,34 +295,73 @@ def main(argv=None):
         image_compiled = qai_hub.get_job(cj["image_compiled_id"]).get_target_model()
         text_compiled = qai_hub.get_job(cj["text_compiled_id"]).get_target_model() if (need_cosine or need_faiss) else None
 
+        def _inference_detail(job: qai_hub.InferenceJob):
+            """
+            Fetch Hub-side timing/memory detail for an inference job.
+            Values are typically in microseconds and bytes.
+            """
+            try:
+                res = job._owner._api_call(hub_api.get_job_results, job.job_id)
+                detail = res.inference_job_result.detail
+                return {
+                    "hub_execution_time_us": detail.execution_time,
+                    "hub_load_time_us": detail.load_time,
+                    "hub_peak_memory_bytes": detail.peak_memory_usage,
+                    "hub_warm_load_time_us": getattr(detail, "warm_load_time", None),
+                    "hub_cold_load_time_us": getattr(detail, "cold_load_time", None),
+                }
+            except Exception as e:
+                return {"detail_error": f"{type(e).__name__}: {e}"}
+
         # Submit text encoder inference early so it can run in parallel with image batches.
         text_embs = None
         text_inf_job = None
+        text_job_id = None
+        text_job_url = None
+        text_wall_s = None
+        text_submitted_at = None
+        text_detail = None
         if need_cosine or need_faiss:
             print(f"Submitting text encoder inference for {model_name}...")
+            text_submitted_at = time.time()
+            text_name = f"{prefix}{model_name} :: text"
             text_inf_job = qai_hub.submit_inference_job(
                 model=text_compiled,
                 device=target_device,
                 inputs=text_dataset,
-                name=f"{prefix}{model_name} :: text",
+                name=text_name,
             )
+            text_job_id = text_inf_job.job_id
+            text_job_url = text_inf_job.url
+            # We'll compute wall time when we actually download outputs.
 
         # Submit image encoder inference in batches (multiple image datasets) to avoid Hub size limits.
         image_embs_parts = []
         pending = list(enumerate(image_dataset_ids))
         active: list[tuple[int, str, qai_hub.InferenceJob]] = []
         results_by_idx: dict[int, np.ndarray] = {}
+        image_jobs: list[dict] = []
 
         def _submit_one(idx: int, ds_id: str):
             img_ds = qai_hub.get_dataset(ds_id)
             print(f"Submitting image encoder inference for {model_name} (batch {idx + 1}/{len(image_dataset_ids)})...")
+            t0 = time.time()
+            name = f"{prefix}{model_name} :: image b{idx + 1}/{len(image_dataset_ids)}"
             job = qai_hub.submit_inference_job(
                 model=image_compiled,
                 device=target_device,
                 inputs=img_ds,
-                name=f"{prefix}{model_name} :: image b{idx + 1}/{len(image_dataset_ids)}",
+                name=name,
             )
             active.append((idx, ds_id, job))
+            image_jobs.append({
+                "batch_index": idx,
+                "dataset_id": ds_id,
+                "job_id": job.job_id,
+                "url": job.url,
+                "name": name,
+                "submitted_at_epoch_s": t0,
+            })
 
         max_jobs = max(1, int(max_inflight))
         while pending or active:
@@ -335,8 +375,12 @@ def main(argv=None):
             if text_inf_job is not None and text_embs is None:
                 st = text_inf_job.get_status()
                 if not (st.running or st.pending):
+                    t_done = time.time()
                     text_embs = np.concatenate(first_output_inference(text_inf_job), axis=0)
                     text_embs = text_embs / np.linalg.norm(text_embs, axis=1, keepdims=True)
+                    if text_submitted_at is not None:
+                        text_wall_s = t_done - text_submitted_at
+                    text_detail = _inference_detail(text_inf_job)
                     progressed = True
 
             still_active: list[tuple[int, str, qai_hub.InferenceJob]] = []
@@ -345,9 +389,16 @@ def main(argv=None):
                 if st.running or st.pending:
                     still_active.append((idx, ds_id, job))
                     continue
+                t_done = time.time()
                 part = np.concatenate(first_output_inference(job), axis=0)
                 part = part / np.linalg.norm(part, axis=1, keepdims=True)
                 results_by_idx[idx] = part
+                # Fill wall time for this batch job.
+                for rec in image_jobs:
+                    if rec.get("batch_index") == idx and rec.get("job_id") == job.job_id and "wall_time_s" not in rec:
+                        rec["wall_time_s"] = t_done - rec["submitted_at_epoch_s"]
+                        rec["hub_detail"] = _inference_detail(job)
+                        break
                 progressed = True
             active = still_active
 
@@ -359,8 +410,12 @@ def main(argv=None):
 
         if (need_cosine or need_faiss) and text_embs is None:
             # If text inference didn't complete during image batching, block now.
+            t_done = time.time()
             text_embs = np.concatenate(first_output_inference(text_inf_job), axis=0)
             text_embs = text_embs / np.linalg.norm(text_embs, axis=1, keepdims=True)
+            if text_submitted_at is not None:
+                text_wall_s = t_done - text_submitted_at
+            text_detail = _inference_detail(text_inf_job)
 
         image_embs = np.concatenate(image_embs_parts, axis=0)
 
@@ -373,14 +428,18 @@ def main(argv=None):
             topk_in = image_embs
 
             print(f"Submitting cosine top-k inference for {model_name}...")
+            topk_submit_t = time.time()
             topk_dataset = qai_hub.upload_dataset({"image_embs": [topk_in], "text_embs": [text_embs]})
+            topk_name = f"{prefix}{model_name} :: topk-cosine"
             topk_inf_job = qai_hub.submit_inference_job(
                 model=topk_compiled,
                 device=target_device,
                 inputs=topk_dataset,
-                name=f"{prefix}{model_name} :: topk-cosine",
+                name=topk_name,
             )
             topk_indices = first_output_inference(topk_inf_job)[0]
+            topk_wall_s = time.time() - topk_submit_t
+            topk_detail = _inference_detail(topk_inf_job)
             recall_at_10 = _recall_from_topk_indices(topk_indices=topk_indices, num_images=num_images)
             results["runs"].append({
                 "model": model_name,
@@ -389,6 +448,11 @@ def main(argv=None):
                 "quantize_type": args.quantize_type,
                 "faiss_compute_unit": args.faiss_compute_unit,
                 "recall_at_10": recall_at_10,
+                "jobs": {
+                    "text": {"job_id": text_job_id, "url": text_job_url, "name": text_name, "wall_time_s": text_wall_s, "hub_detail": text_detail},
+                    "images": sorted(image_jobs, key=lambda r: r.get("batch_index", 0)),
+                    "topk": {"job_id": topk_inf_job.job_id, "url": topk_inf_job.url, "name": topk_name, "wall_time_s": topk_wall_s, "hub_detail": topk_detail},
+                },
                 "job_ids_snapshot": _snapshot_for_run(
                     cj=cj,
                     image_dataset_ids=image_dataset_ids,
@@ -420,15 +484,19 @@ def main(argv=None):
             topk_in = image_embs
 
             print(f"Submitting FAISS top-k inference for {model_name}...")
+            topk_submit_t = time.time()
             topk_dataset = qai_hub.upload_dataset({"image_embs": [topk_in]})
+            topk_name = f"{prefix}{model_name} :: topk-faiss"
             topk_inf_job = qai_hub.submit_inference_job(
                 model=topk_compiled,
                 device=target_device,
                 inputs=topk_dataset,
                 options=f"--compute_unit {args.faiss_compute_unit}",
-                name=f"{prefix}{model_name} :: topk-faiss",
+                name=topk_name,
             )
             topk_indices = first_output_inference(topk_inf_job)[0]
+            topk_wall_s = time.time() - topk_submit_t
+            topk_detail = _inference_detail(topk_inf_job)
             recall_at_10 = _recall_from_topk_indices(topk_indices=topk_indices, num_images=num_images)
             results["runs"].append({
                 "model": model_name,
@@ -437,6 +505,11 @@ def main(argv=None):
                 "quantize_type": args.quantize_type,
                 "faiss_compute_unit": args.faiss_compute_unit,
                 "recall_at_10": recall_at_10,
+                "jobs": {
+                    "text": {"job_id": text_job_id, "url": text_job_url, "name": text_name, "wall_time_s": text_wall_s, "hub_detail": text_detail},
+                    "images": sorted(image_jobs, key=lambda r: r.get("batch_index", 0)),
+                    "topk": {"job_id": topk_inf_job.job_id, "url": topk_inf_job.url, "name": topk_name, "wall_time_s": topk_wall_s, "hub_detail": topk_detail},
+                },
                 "job_ids_snapshot": _snapshot_for_run(
                     cj=cj,
                     image_dataset_ids=image_dataset_ids,
