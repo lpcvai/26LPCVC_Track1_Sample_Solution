@@ -47,6 +47,8 @@ def build_arg_parser():
     parser.add_argument("--faiss-compute-unit", choices=["all", "npu", "gpu", "cpu"], default="all",
                         help="Compute unit for the FAISS inference job (only applies with --topk faiss)")
     parser.add_argument("--device", default="XR2 Gen 2 (Proxy)", help="QAI Hub target device")
+    parser.add_argument("--job-name-prefix", default="",
+                        help="Optional prefix for QAI Hub job names to make jobs easier to identify in the UI.")
     return parser
 
 
@@ -60,6 +62,7 @@ def run_inference(
     image_dataset_id: str,
     text_compiled_id: str | None = None,
     text_dataset_id: str | None = None,
+    job_name_prefix: str = "",
 ):
     missing = []
     if image_compiled_id is None:
@@ -78,6 +81,7 @@ def run_inference(
 
     target_device = qai_hub.Device(device)
     image_dataset = qai_hub.get_dataset(image_dataset_id)
+    prefix = (job_name_prefix.strip() + " ") if job_name_prefix and job_name_prefix.strip() else ""
 
     # Retrieve compiled models from their job IDs
     image_compiled = qai_hub.get_job(image_compiled_id).get_target_model()
@@ -89,6 +93,7 @@ def run_inference(
         model=image_compiled,
         device=target_device,
         inputs=image_dataset,
+        name=f"{prefix}image-encoder",
     )
 
     if topk == "cosine":
@@ -99,6 +104,7 @@ def run_inference(
             model=text_compiled,
             device=target_device,
             inputs=text_dataset,
+            name=f"{prefix}text-encoder",
         )
         text_embs = np.concatenate(first_output(text_inf_job), axis=0)
         text_embs = text_embs / np.linalg.norm(text_embs, axis=1, keepdims=True)
@@ -126,6 +132,7 @@ def run_inference(
             model=topk_compiled,
             device=target_device,
             inputs=topk_dataset,
+            name=f"{prefix}topk-cosine",
         )
     else:
         topk_inf_job = qai_hub.submit_inference_job(
@@ -133,6 +140,7 @@ def run_inference(
             device=target_device,
             inputs=topk_dataset,
             options=topk_options,
+            name=f"{prefix}topk-faiss",
         )
     topk_indices = first_output(topk_inf_job)[0]  # [N, K]
 
@@ -177,6 +185,7 @@ def main(argv=None):
         image_dataset_id=args.image_dataset_id,
         text_compiled_id=args.text_compiled_id,
         text_dataset_id=args.text_dataset_id,
+        job_name_prefix=args.job_name_prefix,
     )
     print(f"Recall@10: {recall_at_10:.4f}  ({recall_at_10 * 100:.2f}%)")
 

@@ -167,13 +167,20 @@ def compile_faiss_index_model(
     faiss_compute_unit: str,
     persist_job_ids: bool = True,
     text_embs: np.ndarray | None = None,
+    job_name_prefix: str = "",
 ):
     """Build a FAISS index model by running text inference, baking embeddings, and compiling."""
     if text_embs is None:
         if text_compiled is None or text_dataset is None:
             raise ValueError("compile_faiss_index_model requires either text_embs or (text_compiled and text_dataset)")
+        prefix = (job_name_prefix.strip() + " ") if job_name_prefix and job_name_prefix.strip() else ""
         print("  Running text encoder inference to build FAISS index...")
-        text_inf_job = qai_hub.submit_inference_job(model=text_compiled, device=target_device, inputs=text_dataset)
+        text_inf_job = qai_hub.submit_inference_job(
+            model=text_compiled,
+            device=target_device,
+            inputs=text_dataset,
+            name=f"{prefix}faiss-index :: text",
+        )
         text_embs = np.concatenate(first_output(text_inf_job), axis=0)
 
     # Ensure embeddings are normalized (compile-time constants in the wrapper).

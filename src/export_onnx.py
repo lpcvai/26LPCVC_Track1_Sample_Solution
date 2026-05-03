@@ -11,6 +11,8 @@ parser = argparse.ArgumentParser()
 group = parser.add_mutually_exclusive_group(required=True)
 group.add_argument("--model", choices=MODELS.keys(), help="Single model to export")
 group.add_argument("--all", action="store_true", help="Export all models")
+parser.add_argument("--image-size", type=int, default=224,
+                    help="Force image input resolution H=W for all exported image encoders (default: 224).")
 args = parser.parse_args()
 
 device = torch.device("cpu")  # use CPU to avoid GPU device issues during export
@@ -58,11 +60,11 @@ def export_model(model_name: str, pretrained: str):
     model = reparameterize_model(model)
     model = model.to(device)
 
-    image_size = model.visual.image_size
-    if isinstance(image_size, (tuple, list)):
-        image_h, image_w = image_size
-    else:
-        image_h = image_w = image_size
+    # NOTE: Some OpenCLIP variants report / use a larger default resolution (e.g. 256).
+    # This repo's datasets are uploaded as 224x224 (see upload_dataset.py), so we force
+    # ONNX export to 224x224 (or user-specified --image-size) to keep Hub compile/inference
+    # input specs consistent across models.
+    image_h = image_w = int(args.image_size)
 
     dummy_image = torch.rand(1, 3, image_h, image_w, dtype=torch.float32, device=device)
     dummy_text = torch.randint(0, model.vocab_size, (1, model.context_length), dtype=torch.int32, device=device)

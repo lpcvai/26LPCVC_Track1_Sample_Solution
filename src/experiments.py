@@ -31,6 +31,10 @@ def build_arg_parser():
                         help="Override image dataset id (otherwise uses job_ids.json)")
     parser.add_argument("--text-dataset-id", default=None,
                         help="Override text dataset id (otherwise uses job_ids.json)")
+    parser.add_argument("--max-workers", type=int, default=8,
+                        help="Max number of models to evaluate concurrently (each model evaluation submits multiple jobs).")
+    parser.add_argument("--job-name-prefix", default="",
+                        help="Optional prefix for QAI Hub inference job names to make jobs easier to identify in the UI.")
     parser.add_argument("--output", default=None, help="Optional path to write a JSON summary.")
     return parser
 
@@ -156,6 +160,7 @@ def main(argv=None):
     # Phase 2: run inference for the runs that support it here.
     from inference import first_output as first_output_inference
     target_device = qai_hub.Device(args.device)
+    prefix = (args.job_name_prefix.strip() + " ") if args.job_name_prefix and args.job_name_prefix.strip() else ""
 
     def _recall_from_topk_indices(*, topk_indices: np.ndarray, num_images: int) -> float:
         recalls = []
@@ -183,11 +188,21 @@ def main(argv=None):
 
         # Submit encoder inference once.
         print(f"Submitting image encoder inference for {model_name}...")
-        image_inf_job = qai_hub.submit_inference_job(model=image_compiled, device=target_device, inputs=image_dataset)
+        image_inf_job = qai_hub.submit_inference_job(
+            model=image_compiled,
+            device=target_device,
+            inputs=image_dataset,
+            name=f"{prefix}{model_name} :: image",
+        )
         text_embs = None
         if need_cosine or need_faiss:
             print(f"Submitting text encoder inference for {model_name}...")
-            text_inf_job = qai_hub.submit_inference_job(model=text_compiled, device=target_device, inputs=text_dataset)
+            text_inf_job = qai_hub.submit_inference_job(
+                model=text_compiled,
+                device=target_device,
+                inputs=text_dataset,
+                name=f"{prefix}{model_name} :: text",
+            )
             text_embs = np.concatenate(first_output_inference(text_inf_job), axis=0)
             text_embs = text_embs / np.linalg.norm(text_embs, axis=1, keepdims=True)
 
@@ -202,7 +217,12 @@ def main(argv=None):
             topk_compiled = qai_hub.get_job(topk_cosine_id).get_target_model()
             topk_dataset = qai_hub.upload_dataset({"image_embs": [image_embs], "text_embs": [text_embs]})
             print(f"Submitting cosine top-k inference for {model_name}...")
-            topk_inf_job = qai_hub.submit_inference_job(model=topk_compiled, device=target_device, inputs=topk_dataset)
+            topk_inf_job = qai_hub.submit_inference_job(
+                model=topk_compiled,
+                device=target_device,
+                inputs=topk_dataset,
+                name=f"{prefix}{model_name} :: topk-cosine",
+            )
             topk_indices = first_output_inference(topk_inf_job)[0]
             recall_at_10 = _recall_from_topk_indices(topk_indices=topk_indices, num_images=num_images)
             results["runs"].append({
@@ -233,6 +253,7 @@ def main(argv=None):
                 faiss_compute_unit=args.faiss_compute_unit,
                 persist_job_ids=False,
                 text_embs=text_embs,
+                job_name_prefix=f"{prefix}{model_name} ::",
             )
             if not faiss_compile or not faiss_compile.get("topk_compiled_id"):
                 raise RuntimeError("FAISS index compile did not return a topk_compiled_id")
@@ -246,6 +267,7 @@ def main(argv=None):
                 device=target_device,
                 inputs=topk_dataset,
                 options=f"--compute_unit {args.faiss_compute_unit}",
+                name=f"{prefix}{model_name} :: topk-faiss",
             )
             topk_indices = first_output_inference(topk_inf_job)[0]
             recall_at_10 = _recall_from_topk_indices(topk_indices=topk_indices, num_images=num_images)
@@ -266,7 +288,7 @@ def main(argv=None):
 
     # Evaluate models with limited concurrency to avoid creating a large number of Hub jobs.
     planned_models = [m for m in models if m in compile_by_model]
-    max_workers = min(2, max(1, len(planned_models)))
+    max_workers = min(max(1, int(args.max_workers)), max(1, len(planned_models)))
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         future_to_model = {ex.submit(_eval_model, m): m for m in planned_models}
         for fut in as_completed(future_to_model):
