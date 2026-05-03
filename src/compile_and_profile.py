@@ -38,7 +38,24 @@ parser.add_argument("--topk", choices=["cosine", "faiss"], default="cosine",
 parser.add_argument("--faiss-compute-unit", choices=["all", "npu", "gpu", "cpu"], default="all",
                     help="Compute unit for FAISS compile and inference jobs (only applies with --topk faiss)")
 parser.add_argument("--profile", action="store_true", help="Submit profile jobs after recall is computed")
+parser.add_argument("--quantize", action="store_true", help="Apply post-training quantization during compilation")
+parser.add_argument("--quantize-type", default="int16", choices=["w4a8", "w8a16", "w4a16", "int8", "int16"],
+                    help="Quantization type (only applies with --quantize)")
+parser.add_argument("--image-calibration-id", default=None,
+                    help="QAI Hub dataset ID for image calibration data (from upload_calibration.py)")
+parser.add_argument("--text-calibration-id", default=None,
+                    help="QAI Hub dataset ID for text calibration data (from upload_calibration.py)")
 args = parser.parse_args()
+
+if args.quantize and (args.image_calibration_id is None or args.text_calibration_id is None):
+    parser.error("--quantize requires --image-calibration-id and --text-calibration-id")
+
+compile_options = "--target_runtime qnn_dlc"
+if args.quantize:
+    compile_options += f" --quantize_full_type {args.quantize_type}"
+
+image_calib_dataset = qai_hub.get_dataset(args.image_calibration_id) if args.quantize else None
+text_calib_dataset  = qai_hub.get_dataset(args.text_calibration_id)  if args.quantize else None
 
 targets = MODELS if args.all else {args.model: MODELS[args.model]}
 
@@ -110,20 +127,22 @@ for model_name in targets:
         model=onnx_img,
         device=target_device,
         input_specs=get_input_specs(onnx_img),
-        options="--target_runtime qnn_dlc",
+        options=compile_options,
+        calibration_data=image_calib_dataset,
     )
     txt_compile_job = qai_hub.submit_compile_job(
         model=onnx_txt,
         device=target_device,
         input_specs=get_input_specs(onnx_txt),
-        options="--target_runtime qnn_dlc",
+        options=compile_options,
+        calibration_data=text_calib_dataset,
     )
     if args.topk == "device":
         topk_compile_job = qai_hub.submit_compile_job(
             model=onnx_topk,
             device=target_device,
             input_specs=get_input_specs(onnx_topk),
-            options="--target_runtime qnn_dlc",
+            options=compile_options,
         )
         print(f"  Compile job IDs — image: {img_compile_job.job_id}, text: {txt_compile_job.job_id}, topk: {topk_compile_job.job_id}")
     else:
@@ -189,7 +208,7 @@ for model_name in targets:
             model=onnx_faiss,
             device=target_device,
             input_specs=get_input_specs(onnx_faiss),
-            options=f"--target_runtime qnn_dlc --compute_unit {args.faiss_compute_unit}",
+            options=f"{compile_options} --compute_unit {args.faiss_compute_unit}",
         )
         print(f"  FAISS compile job ID: {faiss_compile_job.job_id}")
         faiss_compiled = faiss_compile_job.get_target_model()
