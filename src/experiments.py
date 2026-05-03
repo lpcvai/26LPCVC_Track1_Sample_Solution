@@ -31,7 +31,7 @@ def build_arg_parser():
                         help="Override image dataset id (otherwise uses job_ids.json)")
     parser.add_argument("--text-dataset-id", default=None,
                         help="Override text dataset id (otherwise uses job_ids.json)")
-    parser.add_argument("--max-workers", type=int, default=8,
+    parser.add_argument("--max-workers", type=int, default=2,
                         help="Max number of models to evaluate concurrently (each model evaluation submits multiple jobs).")
     parser.add_argument("--job-name-prefix", default="",
                         help="Optional prefix for QAI Hub inference job names to make jobs easier to identify in the UI.")
