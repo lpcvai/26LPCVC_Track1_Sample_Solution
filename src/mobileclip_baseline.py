@@ -44,10 +44,10 @@ ds = load_dataset("yerevann/coco-karpathy")
 splits = ["test"] if args.test_only else list(ds.keys())
 
 # Collect texts and images across selected splits, tracking cocoid for recall
-all_texts = []     # flat list of all captions
+all_texts = []  # flat list of all captions
 text_cocoids = []  # parallel: which image each caption belongs to
-image_urls = []    # one entry per image
-image_cocoids = [] # parallel: cocoid for each image
+image_urls = []  # one entry per image
+image_cocoids = []  # parallel: cocoid for each image
 
 for split in splits:
     for example in ds[split]:
@@ -72,7 +72,7 @@ print("Encoding texts...")
 all_text_embeddings = []
 with torch.no_grad(), torch.cuda.amp.autocast(enabled=device == "cuda"):
     for i in tqdm(range(0, len(all_texts), BATCH_SIZE), unit="batch", desc="texts"):
-        batch = all_texts[i : i + BATCH_SIZE]
+        batch = all_texts[i: i + BATCH_SIZE]
         tokens = tokenizer(batch).to(device)
         features = model.encode_text(tokens)
         features = features / features.norm(dim=-1, keepdim=True)
@@ -88,7 +88,7 @@ all_image_embeddings = []
 
 image_pbar = tqdm(range(0, len(image_urls), BATCH_SIZE), unit="batch", desc="images")
 for batch_start in image_pbar:
-    batch_urls = image_urls[batch_start : batch_start + BATCH_SIZE]
+    batch_urls = image_urls[batch_start: batch_start + BATCH_SIZE]
 
     # Download the batch in parallel
     images = [None] * len(batch_urls)
@@ -124,7 +124,7 @@ print(f"Saved image_embeddings.npy {image_embeddings.shape}")
 # ── Recall@10 ─────────────────────────────────────────────────────────────────
 print("Computing recall@10...")
 text_emb = torch.from_numpy(text_embeddings)  # [N_texts, D]
-img_emb  = torch.from_numpy(image_embeddings) # [N_images, D]
+img_emb = torch.from_numpy(image_embeddings)  # [N_images, D]
 
 recalls = []
 for i in tqdm(range(len(image_cocoids)), desc="recall@10"):
@@ -141,4 +141,4 @@ for i in tqdm(range(len(image_cocoids)), desc="recall@10"):
     recalls.append(recall_i)
 
 recall_at_10 = float(np.mean(recalls))
-print(f"Recall@10: {recall_at_10:.4f}  ({recall_at_10*100:.2f}%)")
+print(f"Recall@10: {recall_at_10:.4f}  ({recall_at_10 * 100:.2f}%)")
