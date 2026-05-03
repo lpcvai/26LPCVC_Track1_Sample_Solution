@@ -15,7 +15,13 @@ MODELS = {
     "MobileCLIP2-S3": "dfndr2b",
 }
 
-NUM_IMAGE_SAMPLES = 500
+NUM_IMAGE_SAMPLES = 1000
+# When NUM_IMAGE_SAMPLES is large, uploading/running inference on a single image dataset can exceed
+# QAI Hub's 2GB flatbuffer limit. Upload images in batches and run multiple inference jobs.
+IMAGES_PER_BATCH = 1000
+# When running many batched inference jobs, limit how many we keep in-flight at once
+# to avoid hammering the Hub API while still keeping throughput decent.
+MAX_INFERENCE_INFLIGHT = 2
 CAPTIONS_PER_IMAGE = 5
 NUM_TEXT_SAMPLES = NUM_IMAGE_SAMPLES * CAPTIONS_PER_IMAGE
 K = 10
@@ -54,11 +60,27 @@ class JobIds:
         if self.path.exists():
             with self.path.open("r") as f:
                 self.data = json.load(f) or {}
-                return
+            # Backwards-compatible defaults for new fields.
+            if "text" not in self.data or not isinstance(self.data.get("text"), dict):
+                self.data["text"] = {}
+            if "image" not in self.data or not isinstance(self.data.get("image"), dict):
+                self.data["image"] = {}
+            if "topk" not in self.data or not isinstance(self.data.get("topk"), dict):
+                self.data["topk"] = {}
+            self.data["text"].setdefault("compiled_id", None)
+            self.data["text"].setdefault("dataset_id", None)
+            self.data["image"].setdefault("compiled_id", None)
+            self.data["image"].setdefault("dataset_id", None)  # legacy single dataset id
+            self.data["image"].setdefault("dataset_ids", [])   # new: list of image dataset ids (batched)
+            self.data["topk"].setdefault("compiled_id", None)
+            # Ensure file is normalized to include new fields.
+            self.save()
+            return
+
         self.data = {
-            "text": {"compiled_id": None, "dataset_id": None, },
-            "image": {"compiled_id": None, "dataset_id": None, },
-            "topk": {"compiled_id": None}
+            "text": {"compiled_id": None, "dataset_id": None},
+            "image": {"compiled_id": None, "dataset_id": None, "dataset_ids": []},
+            "topk": {"compiled_id": None},
         }
         # Ensure a valid initial file exists.
         self.save()

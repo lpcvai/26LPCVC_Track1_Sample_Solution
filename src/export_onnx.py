@@ -5,7 +5,7 @@ import open_clip
 import torch
 from timm.utils import reparameterize_model
 
-from utils import MODELS, RESULTS_PATH, NUM_IMAGE_SAMPLES, NUM_TEXT_SAMPLES, K
+from utils import MODELS, RESULTS_PATH, NUM_IMAGE_SAMPLES, CAPTIONS_PER_IMAGE, K
 
 parser = argparse.ArgumentParser()
 group = parser.add_mutually_exclusive_group(required=True)
@@ -13,6 +13,12 @@ group.add_argument("--model", choices=MODELS.keys(), help="Single model to expor
 group.add_argument("--all", action="store_true", help="Export all models")
 parser.add_argument("--image-size", type=int, default=224,
                     help="Force image input resolution H=W for all exported image encoders (default: 224).")
+parser.add_argument("--num-images", type=int, default=NUM_IMAGE_SAMPLES,
+                    help="Total number of images in the evaluation dataset. Used to size the top-k text embedding input "
+                         "(num_images * captions_per_image).")
+parser.add_argument("--images-per-batch", type=int, default=NUM_IMAGE_SAMPLES,
+                    help="Number of image embeddings per top-k inference batch. "
+                         "Default is NUM_IMAGE_SAMPLES (i.e., run top-k in one shot).")
 args = parser.parse_args()
 
 device = torch.device("cpu")  # use CPU to avoid GPU device issues during export
@@ -38,13 +44,14 @@ class TextEncoderWrapper(torch.nn.Module):
 
 class TopKWrapper(torch.nn.Module):
     """Computes cosine similarity and returns top-k text indices for each image."""
+
     def __init__(self, k: int):
         super().__init__()
         self.k = k
 
     def forward(self, image_embs, text_embs):
-        # image_embs: [N_img, D], text_embs: [N_txt, D], both L2-normalised
-        sims = image_embs @ text_embs.T              # [N_img, N_txt]
+        # image_embs: [N_img, D], text_embs: [N_txt, D], both L2-normalized
+        sims = image_embs @ text_embs.T  # [N_img, N_txt]
         return torch.topk(sims, self.k, dim=-1).indices.to(torch.int32)  # [N_img, K]
 
 
@@ -60,7 +67,7 @@ def export_model(model_name: str, pretrained: str):
     model = reparameterize_model(model)
     model = model.to(device)
 
-    # NOTE: Some OpenCLIP variants report / use a larger default resolution (e.g. 256).
+    # NOTE: Some OpenCLIP variants report / use a larger default resolution (e.g., 256).
     # This repo's datasets are uploaded as 224x224 (see upload_dataset.py), so we force
     # ONNX export to 224x224 (or user-specified --image-size) to keep Hub compile/inference
     # input specs consistent across models.
@@ -73,8 +80,8 @@ def export_model(model_name: str, pretrained: str):
         embed_dim = model.encode_image(dummy_image).shape[-1]
 
     image_encoder = ImageEncoderWrapper(model).eval()
-    text_encoder  = TextEncoderWrapper(model).eval()
-    topk_model    = TopKWrapper(k=K).eval()
+    text_encoder = TextEncoderWrapper(model).eval()
+    topk_model = TopKWrapper(k=K).eval()
 
     image_onnx_path = os.path.join(onnx_dir, "image_encoder.onnx")
     print(f"Exporting image encoder → {image_onnx_path}...")
@@ -110,8 +117,11 @@ def export_model(model_name: str, pretrained: str):
         dynamo=True,
     )
     topk_onnx_path = os.path.join(onnx_dir, "topk_retrieval.onnx")
-    dummy_image_embs = torch.rand(NUM_IMAGE_SAMPLES, embed_dim, dtype=torch.float32, device=device)
-    dummy_text_embs  = torch.rand(NUM_TEXT_SAMPLES,  embed_dim, dtype=torch.float32, device=device)
+    # Top-k inference runs in image batches to avoid oversized datasets and to match the
+    # compiled input spec of the top-k model.
+    dummy_image_embs = torch.rand(int(args.images_per_batch), embed_dim, dtype=torch.float32, device=device)
+    num_text_samples = int(args.num_images) * int(CAPTIONS_PER_IMAGE)
+    dummy_text_embs = torch.rand(num_text_samples, embed_dim, dtype=torch.float32, device=device)
     print(f"Exporting top-k retrieval  → {topk_onnx_path}...")
     torch.onnx.export(
         topk_model,
@@ -129,7 +139,7 @@ def export_model(model_name: str, pretrained: str):
     )
     print(f"Export complete for {model_name}.")
 
-
-targets = MODELS if args.all else {args.model: MODELS[args.model]}
-for model_name, pretrained in targets.items():
-    export_model(model_name, pretrained)
+if __name__ == "__main__":
+    targets = MODELS if args.all else {args.model: MODELS[args.model]}
+    for model_name, pretrained in targets.items():
+        export_model(model_name, pretrained)

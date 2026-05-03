@@ -6,7 +6,7 @@ import onnx
 import torch
 import qai_hub
 
-from utils import RESULTS_PATH, MODELS, NUM_IMAGE_SAMPLES, CAPTIONS_PER_IMAGE, K, JOB_IDS
+from utils import RESULTS_PATH, MODELS, NUM_IMAGE_SAMPLES, CAPTIONS_PER_IMAGE, K, JOB_IDS, IMAGES_PER_BATCH
 # NOTE: This module is responsible for submitting compile/profile jobs.
 # Inference/evaluation lives in src/inference.py and src/upload_and_run.py.
 
@@ -168,6 +168,7 @@ def compile_faiss_index_model(
     persist_job_ids: bool = True,
     text_embs: np.ndarray | None = None,
     job_name_prefix: str = "",
+    images_per_batch: int = IMAGES_PER_BATCH,
 ):
     """Build a FAISS index model by running text inference, baking embeddings, and compiling."""
     if text_embs is None:
@@ -188,7 +189,7 @@ def compile_faiss_index_model(
 
     faiss_model = FAISSIndexWrapper(text_embs, k=K).eval()
     faiss_onnx_path = os.path.join(onnx_dir, "faiss_index.onnx")
-    dummy_img_embs = torch.rand(NUM_IMAGE_SAMPLES, text_embs.shape[1], dtype=torch.float32)
+    dummy_img_embs = torch.rand(int(images_per_batch), text_embs.shape[1], dtype=torch.float32)
     print(f"  Exporting FAISS index model → {faiss_onnx_path}...")
     torch.onnx.export(
         faiss_model,
