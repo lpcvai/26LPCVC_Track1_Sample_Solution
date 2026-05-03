@@ -15,7 +15,7 @@ parser = argparse.ArgumentParser(description="Re-run inference on already-compil
 parser.add_argument("--image-compiled-id", default=JOB_IDS["image", "compiled_id"],
                     help="Compile job ID for the image encoder. If omitted, uses job_ids.json.")
 parser.add_argument("--text-compiled-id", default=JOB_IDS["text", "compiled_id"],
-                    help="Compile job ID for the text encoder (required for --topk device). "
+                    help="Compile job ID for the text encoder (required for --topk cosine). "
                          "If omitted, uses job_ids.json.")
 parser.add_argument("--topk-compiled-id", default=JOB_IDS["topk", "compiled_id"],
                     help="Compile job ID for the top-k model (topk_retrieval or faiss_index). "
@@ -23,8 +23,8 @@ parser.add_argument("--topk-compiled-id", default=JOB_IDS["topk", "compiled_id"]
 parser.add_argument("--image-dataset-id", default=JOB_IDS["image", "dataset_id"],
                     help="QAI Hub dataset ID for images. If omitted, uses job_ids.json.")
 parser.add_argument("--text-dataset-id", default=JOB_IDS["text", "dataset_id"],
-                    help="QAI Hub dataset ID for texts (required for --topk device). If omitted, uses job_ids.json.")
-parser.add_argument("--topk", choices=["cosine", "faiss"], default="device",
+                    help="QAI Hub dataset ID for texts (required for --topk cosine). If omitted, uses job_ids.json.")
+parser.add_argument("--topk", choices=["cosine", "faiss"], default="cosine",
                     help="Top-k method used when the model was compiled")
 parser.add_argument("--faiss-compute-unit", choices=["all", "npu", "gpu", "cpu"], default="all",
                     help="Compute unit for the FAISS inference job (only applies with --topk faiss)")
@@ -32,15 +32,15 @@ parser.add_argument("--device", default="XR2 Gen 2 (Proxy)", help="QAI Hub targe
 args = parser.parse_args()
 
 missing = []
-if args.img_compiled_id is None:
-    missing.append("--img-compiled-id")
+if args.image_compiled_id is None:
+    missing.append("--image-compiled-id")
 if args.topk_compiled_id is None:
     missing.append("--topk-compiled-id")
 if args.image_dataset_id is None:
     missing.append("--image-dataset-id")
-if args.topk == "device":
-    if args.txt_compiled_id is None:
-        missing.append("--txt-compiled-id")
+if args.topk == "cosine":
+    if args.text_compiled_id is None:
+        missing.append("--text-compiled-id")
     if args.text_dataset_id is None:
         missing.append("--text-dataset-id")
 if missing:
@@ -54,7 +54,7 @@ target_device = qai_hub.Device(args.device)
 image_dataset = qai_hub.get_dataset(args.image_dataset_id)
 
 # Retrieve compiled models from their job IDs
-img_compiled = qai_hub.get_job(args.img_compiled_id).get_target_model()
+img_compiled = qai_hub.get_job(args.image_compiled_id).get_target_model()
 topk_compiled = qai_hub.get_job(args.topk_compiled_id).get_target_model()
 
 # ── Encoder inference ──────────────────────────────────────────────────────────
@@ -65,8 +65,8 @@ img_inf_job = qai_hub.submit_inference_job(
     inputs=image_dataset,
 )
 
-if args.topk == "device":
-    txt_compiled = qai_hub.get_job(args.txt_compiled_id).get_target_model()
+if args.topk == "cosine":
+    txt_compiled = qai_hub.get_job(args.text_compiled_id).get_target_model()
     text_dataset = qai_hub.get_dataset(args.text_dataset_id)
     print("Submitting text encoder inference...")
     txt_inf_job = qai_hub.submit_inference_job(
@@ -81,7 +81,7 @@ image_embs = np.concatenate(first_output(img_inf_job), axis=0)
 image_embs = image_embs / np.linalg.norm(image_embs, axis=1, keepdims=True)
 
 # ── Top-k on device ────────────────────────────────────────────────────────────
-if args.topk == "device":
+if args.topk == "cosine":
     topk_dataset = qai_hub.upload_dataset({
         "image_embs": [image_embs],
         "text_embs": [text_embs],

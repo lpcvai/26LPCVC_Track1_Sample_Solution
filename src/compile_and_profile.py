@@ -120,7 +120,7 @@ for model_name in targets:
     topk_onnx_path = os.path.join(onnx_dir, "topk_retrieval.onnx")
 
     required_paths = [image_onnx_path, text_onnx_path]
-    if args.topk == "device":
+    if args.topk == "cosine":
         required_paths.append(topk_onnx_path)
     if not all(os.path.exists(p) for p in required_paths):
         print(f"  Skipping: ONNX not found. Run: python src/export_onnx.py --all")
@@ -128,8 +128,8 @@ for model_name in targets:
 
     onnx_img = load_and_validate(image_onnx_path, "image encoder")
     onnx_txt = load_and_validate(text_onnx_path, "text encoder")
-    onnx_topk = load_and_validate(topk_onnx_path, "top-k retrieval") if args.topk == "device" else None
-    if onnx_img is None or onnx_txt is None or (args.topk == "device" and onnx_topk is None):
+    onnx_topk = load_and_validate(topk_onnx_path, "top-k retrieval") if args.topk == "cosine" else None
+    if onnx_img is None or onnx_txt is None or (args.topk == "cosine" and onnx_topk is None):
         continue
 
     # ── Compile (submit all jobs first, then await) ───────────────────────────
@@ -151,7 +151,7 @@ for model_name in targets:
     # Persist latest compile job IDs for convenience re-runs (CLI always overrides).
     JOB_IDS["image", "compiled_id"] = img_compile_job.job_id
     JOB_IDS["text", "compiled_id"] = txt_compile_job.job_id
-    if args.topk == "device":
+    if args.topk == "cosine":
         topk_compile_job = qai_hub.submit_compile_job(
             model=onnx_topk,
             device=target_device,
@@ -167,7 +167,7 @@ for model_name in targets:
     img_compiled = img_compile_job.get_target_model()
     txt_compiled = txt_compile_job.get_target_model()
 
-    if args.topk == "device":
+    if args.topk == "cosine":
         topk_compiled = topk_compile_job.get_target_model()
 
         # ── Encoder inference ─────────────────────────────────────────────────
@@ -181,7 +181,7 @@ for model_name in targets:
         image_embs = image_embs / np.linalg.norm(image_embs, axis=1, keepdims=True)
         text_embs = text_embs / np.linalg.norm(text_embs, axis=1, keepdims=True)
 
-        # ── Top-k on device ───────────────────────────────────────────────────
+        # ── Top-k cosine on device ────────────────────────────────────────────
         topk_dataset = qai_hub.upload_dataset({
             "image_embs": [image_embs],  # single sample: [N, D]
             "text_embs": [text_embs],  # single sample: [N, D]
@@ -258,7 +258,7 @@ for model_name in targets:
     print(f"  Recall@10: {recall_at_10:.4f}  ({recall_at_10 * 100:.2f}%)")
     recall_summary[model_name] = recall_at_10
     compiled_models[model_name] = [img_compiled, txt_compiled,
-                                   topk_compiled if args.topk == "device" else faiss_compiled]
+                                   topk_compiled if args.topk == "cosine" else faiss_compiled]
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 print(f"\n{'═' * 60}")
