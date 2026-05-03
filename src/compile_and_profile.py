@@ -161,18 +161,22 @@ def compile_model(
 def compile_faiss_index_model(
     *,
     target_device,
-    text_compiled,
-    text_dataset,
+    text_compiled=None,
+    text_dataset=None,
     onnx_dir: str,
     faiss_compute_unit: str,
     persist_job_ids: bool = True,
+    text_embs: np.ndarray | None = None,
 ):
     """Build a FAISS index model by running text inference, baking embeddings, and compiling."""
-    if text_compiled is None or text_dataset is None:
-        raise ValueError("compile_faiss_index_model requires text_compiled and text_dataset")
-    print("  Running text encoder inference to build FAISS index...")
-    text_inf_job = qai_hub.submit_inference_job(model=text_compiled, device=target_device, inputs=text_dataset)
-    text_embs = np.concatenate(first_output(text_inf_job), axis=0)
+    if text_embs is None:
+        if text_compiled is None or text_dataset is None:
+            raise ValueError("compile_faiss_index_model requires either text_embs or (text_compiled and text_dataset)")
+        print("  Running text encoder inference to build FAISS index...")
+        text_inf_job = qai_hub.submit_inference_job(model=text_compiled, device=target_device, inputs=text_dataset)
+        text_embs = np.concatenate(first_output(text_inf_job), axis=0)
+
+    # Ensure embeddings are normalized (compile-time constants in the wrapper).
     text_embs = text_embs / np.linalg.norm(text_embs, axis=1, keepdims=True)
 
     faiss_model = FAISSIndexWrapper(text_embs, k=K).eval()

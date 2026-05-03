@@ -6,8 +6,9 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import compile_and_profile
+import numpy as np
 import qai_hub
-from utils import MODELS, RESULTS_PATH, JOB_IDS
+from utils import MODELS, RESULTS_PATH, JOB_IDS, CAPTIONS_PER_IMAGE
 
 
 def build_arg_parser():
@@ -88,36 +89,40 @@ def main(argv=None):
         "runs": [],
     }
 
-    # Phase 1: submit all compile jobs first so Hub can compile them concurrently.
-    planned_runs = []
+    # Phase 1: submit compile jobs once per model (shared across cosine/faiss modes).
+    # Previously we compiled per (model, topk_mode), which doubled compile jobs and caused
+    # extra encoder inference work downstream.
+    compile_by_model: dict[str, dict] = {}
+    need_cosine = "cosine" in topk_modes
+    need_faiss = "faiss" in topk_modes
+    compile_topk_mode = "cosine" if need_cosine else "faiss"
+
     for model_name in models:
-        for topk_mode in topk_modes:
-            print(f"\n{'=' * 70}")
-            print(f"Experiment: model={model_name} topk={topk_mode} quantize={args.quantize}")
-            print(f"{'=' * 70}")
+        print(f"\n{'=' * 70}")
+        print(f"Compile: model={model_name} topk={compile_topk_mode} quantize={args.quantize}")
+        print(f"{'=' * 70}")
 
-            run_args = argparse.Namespace(
-                model=model_name,
-                all=False,
-                image_dataset_id=image_dataset_id,
-                text_dataset_id=text_dataset_id,
-                device=args.device,
-                topk=topk_mode,
-                faiss_compute_unit=args.faiss_compute_unit,
-                profile=False,
-                quantize=args.quantize,
-                quantize_type=args.quantize_type,
-                image_calibration_id=args.image_calibration_id,
-                text_calibration_id=args.text_calibration_id,
-            )
+        run_args = argparse.Namespace(
+            model=model_name,
+            all=False,
+            image_dataset_id=image_dataset_id,
+            text_dataset_id=text_dataset_id,
+            device=args.device,
+            topk=compile_topk_mode,
+            faiss_compute_unit=args.faiss_compute_unit,
+            profile=False,
+            quantize=args.quantize,
+            quantize_type=args.quantize_type,
+            image_calibration_id=args.image_calibration_id,
+            text_calibration_id=args.text_calibration_id,
+        )
 
-            # NOTE: Even though inference must wait for compile completion, submitting all compile jobs
-            # up-front avoids serializing compiles across runs.
-            try:
-                # Avoid mutating job_ids.json during experiments. We want each run to carry
-                # its own compile job IDs, not "whatever was last written".
-                compile_jobs = compile_and_profile.run_pipeline(run_args, persist_job_ids=False) or {}
-            except Exception as e:
+        try:
+            # Avoid mutating job_ids.json during experiments. We want each run to carry
+            # its own compile job IDs, not "whatever was last written".
+            compile_jobs = compile_and_profile.run_pipeline(run_args, persist_job_ids=False) or {}
+        except Exception as e:
+            for topk_mode in topk_modes:
                 results["runs"].append({
                     "model": model_name,
                     "topk": topk_mode,
@@ -128,11 +133,12 @@ def main(argv=None):
                     "job_ids_snapshot": copy.deepcopy(JOB_IDS.data),
                     "error": f"compile_submit_failed: {type(e).__name__}: {e}",
                 })
-                print(f"  ERROR: compile submit failed: {type(e).__name__}: {e}")
-                continue
+            print(f"  ERROR: compile submit failed: {type(e).__name__}: {e}")
+            continue
 
-            cj = compile_jobs.get(model_name)
-            if cj is None:
+        cj = compile_jobs.get(model_name)
+        if cj is None:
+            for topk_mode in topk_modes:
                 results["runs"].append({
                     "model": model_name,
                     "topk": topk_mode,
@@ -143,96 +149,65 @@ def main(argv=None):
                     "job_ids_snapshot": copy.deepcopy(JOB_IDS.data),
                     "error": "compile_skipped_or_failed",
                 })
-                continue
+            continue
 
-            planned_runs.append({
-                "model": model_name,
-                "topk": topk_mode,
-                "compile_job_ids": cj,
-            })
+        compile_by_model[model_name] = cj
 
     # Phase 2: run inference for the runs that support it here.
-    from inference import run_inference
+    from inference import first_output as first_output_inference
     target_device = qai_hub.Device(args.device)
 
-    def _run_one(run_dict):
-        cj = run_dict["compile_job_ids"]
-        topk_mode = run_dict["topk"]
-        text_dataset = qai_hub.get_dataset(text_dataset_id)
+    def _recall_from_topk_indices(*, topk_indices: np.ndarray, num_images: int) -> float:
+        recalls = []
+        for i in range(num_images):
+            gt = set(range(i * CAPTIONS_PER_IMAGE, (i + 1) * CAPTIONS_PER_IMAGE))
+            recalls.append(len(gt & set(topk_indices[i].tolist())) / CAPTIONS_PER_IMAGE)
+        return float(np.mean(recalls))
 
-        if topk_mode == "faiss":
-            # FAISS top-k: build an index model by running text inference, baking embeddings,
-            # exporting an ONNX wrapper, then compiling that wrapper as the "topk model".
-            text_compiled = qai_hub.get_job(cj["text_compiled_id"]).get_target_model()
-            faiss_compile = compile_and_profile.compile_faiss_index_model(
-                target_device=target_device,
-                text_compiled=text_compiled,
-                text_dataset=text_dataset,
-                onnx_dir=cj["onnx_dir"],
-                faiss_compute_unit=args.faiss_compute_unit,
-                persist_job_ids=False,
-            )
-            if not faiss_compile or not faiss_compile.get("topk_compiled_id"):
-                raise RuntimeError("FAISS index compile did not return a topk_compiled_id")
-            topk_compiled_id = faiss_compile["topk_compiled_id"]
+    def _eval_model(model_name: str):
+        """
+        Evaluate one model. This is intentionally "one model at a time" to avoid exploding
+        the number of concurrent Hub jobs.
 
-            recall = run_inference(
-                device=args.device,
-                topk="faiss",
-                faiss_compute_unit=args.faiss_compute_unit,
-                image_compiled_id=cj["image_compiled_id"],
-                topk_compiled_id=topk_compiled_id,
-                image_dataset_id=image_dataset_id,
-            )
-            return recall, topk_compiled_id
+        Optimization: when both cosine+faiss are requested, run image encoder inference
+        once and (if needed) text encoder inference once, then reuse embeddings for both
+        top-k modes.
+        """
+        cj = compile_by_model[model_name]
 
-        # cosine
-        recall = run_inference(
-            device=args.device,
-            topk="cosine",
-            faiss_compute_unit=args.faiss_compute_unit,
-            image_compiled_id=cj["image_compiled_id"],
-            topk_compiled_id=cj.get("topk_compiled_id"),
-            image_dataset_id=image_dataset_id,
-            text_compiled_id=cj["text_compiled_id"],
-            text_dataset_id=text_dataset_id,
-        )
-        return recall, cj.get("topk_compiled_id")
+        image_dataset = qai_hub.get_dataset(image_dataset_id)
+        text_dataset = qai_hub.get_dataset(text_dataset_id) if (need_cosine or need_faiss) else None
 
-    # A modest worker count avoids hammering the Hub API/client while still preventing
-    # "wait for compile then infer" from becoming serialized across many runs.
-    max_workers = min(4, max(1, len(planned_runs)))
-    with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        future_to_run = {ex.submit(_run_one, run): run for run in planned_runs}
-        for fut in as_completed(future_to_run):
-            run = future_to_run[fut]
-            model_name = run["model"]
-            topk_mode = run["topk"]
-            cj = run["compile_job_ids"]
-            try:
-                recall_at_10, topk_compiled_id = fut.result()
-            except Exception as e:
-                results["runs"].append({
-                    "model": model_name,
-                    "topk": topk_mode,
-                    "quantize": bool(args.quantize),
-                    "quantize_type": args.quantize_type,
-                    "faiss_compute_unit": args.faiss_compute_unit,
-                    "recall_at_10": None,
-                    "job_ids_snapshot": _job_ids_snapshot_for_run(
-                        cj=cj,
-                        image_dataset_id=image_dataset_id,
-                        text_dataset_id=text_dataset_id,
-                        topk_compiled_id=cj.get("topk_compiled_id"),
-                    ),
-                    "error": f"{type(e).__name__}: {e}",
-                })
-                print(f"  ERROR: {model_name} {topk_mode}: {type(e).__name__}: {e}")
-                continue
+        image_compiled = qai_hub.get_job(cj["image_compiled_id"]).get_target_model()
+        text_compiled = qai_hub.get_job(cj["text_compiled_id"]).get_target_model() if (need_cosine or need_faiss) else None
 
+        # Submit encoder inference once.
+        print(f"Submitting image encoder inference for {model_name}...")
+        image_inf_job = qai_hub.submit_inference_job(model=image_compiled, device=target_device, inputs=image_dataset)
+        text_embs = None
+        if need_cosine or need_faiss:
+            print(f"Submitting text encoder inference for {model_name}...")
+            text_inf_job = qai_hub.submit_inference_job(model=text_compiled, device=target_device, inputs=text_dataset)
+            text_embs = np.concatenate(first_output_inference(text_inf_job), axis=0)
+            text_embs = text_embs / np.linalg.norm(text_embs, axis=1, keepdims=True)
+
+        image_embs = np.concatenate(first_output_inference(image_inf_job), axis=0)
+        image_embs = image_embs / np.linalg.norm(image_embs, axis=1, keepdims=True)
+
+        num_images = image_embs.shape[0]
+
+        # Cosine top-k
+        if need_cosine:
+            topk_cosine_id = cj.get("topk_compiled_id")
+            topk_compiled = qai_hub.get_job(topk_cosine_id).get_target_model()
+            topk_dataset = qai_hub.upload_dataset({"image_embs": [image_embs], "text_embs": [text_embs]})
+            print(f"Submitting cosine top-k inference for {model_name}...")
+            topk_inf_job = qai_hub.submit_inference_job(model=topk_compiled, device=target_device, inputs=topk_dataset)
+            topk_indices = first_output_inference(topk_inf_job)[0]
+            recall_at_10 = _recall_from_topk_indices(topk_indices=topk_indices, num_images=num_images)
             results["runs"].append({
                 "model": model_name,
-                "topk": topk_mode,
+                "topk": "cosine",
                 "quantize": bool(args.quantize),
                 "quantize_type": args.quantize_type,
                 "faiss_compute_unit": args.faiss_compute_unit,
@@ -241,9 +216,82 @@ def main(argv=None):
                     cj=cj,
                     image_dataset_id=image_dataset_id,
                     text_dataset_id=text_dataset_id,
-                    topk_compiled_id=topk_compiled_id,
+                    topk_compiled_id=topk_cosine_id,
                 ),
             })
+
+        # FAISS top-k
+        if need_faiss:
+            if text_embs is None:
+                raise RuntimeError("Internal error: missing text embeddings for FAISS evaluation")
+
+            # Build+compile FAISS index model using the already-computed text embeddings.
+            # This avoids a second text encoder inference job when both modes are requested.
+            faiss_compile = compile_and_profile.compile_faiss_index_model(
+                target_device=target_device,
+                onnx_dir=cj["onnx_dir"],
+                faiss_compute_unit=args.faiss_compute_unit,
+                persist_job_ids=False,
+                text_embs=text_embs,
+            )
+            if not faiss_compile or not faiss_compile.get("topk_compiled_id"):
+                raise RuntimeError("FAISS index compile did not return a topk_compiled_id")
+            topk_faiss_id = faiss_compile["topk_compiled_id"]
+
+            topk_compiled = qai_hub.get_job(topk_faiss_id).get_target_model()
+            topk_dataset = qai_hub.upload_dataset({"image_embs": [image_embs]})
+            print(f"Submitting FAISS top-k inference for {model_name}...")
+            topk_inf_job = qai_hub.submit_inference_job(
+                model=topk_compiled,
+                device=target_device,
+                inputs=topk_dataset,
+                options=f"--compute_unit {args.faiss_compute_unit}",
+            )
+            topk_indices = first_output_inference(topk_inf_job)[0]
+            recall_at_10 = _recall_from_topk_indices(topk_indices=topk_indices, num_images=num_images)
+            results["runs"].append({
+                "model": model_name,
+                "topk": "faiss",
+                "quantize": bool(args.quantize),
+                "quantize_type": args.quantize_type,
+                "faiss_compute_unit": args.faiss_compute_unit,
+                "recall_at_10": recall_at_10,
+                "job_ids_snapshot": _job_ids_snapshot_for_run(
+                    cj=cj,
+                    image_dataset_id=image_dataset_id,
+                    text_dataset_id=text_dataset_id,
+                    topk_compiled_id=topk_faiss_id,
+                ),
+            })
+
+    # Evaluate models with limited concurrency to avoid creating a large number of Hub jobs.
+    planned_models = [m for m in models if m in compile_by_model]
+    max_workers = min(2, max(1, len(planned_models)))
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        future_to_model = {ex.submit(_eval_model, m): m for m in planned_models}
+        for fut in as_completed(future_to_model):
+            model_name = future_to_model[fut]
+            try:
+                fut.result()
+            except Exception as e:
+                cj = compile_by_model.get(model_name) or {}
+                for topk_mode in topk_modes:
+                    results["runs"].append({
+                        "model": model_name,
+                        "topk": topk_mode,
+                        "quantize": bool(args.quantize),
+                        "quantize_type": args.quantize_type,
+                        "faiss_compute_unit": args.faiss_compute_unit,
+                        "recall_at_10": None,
+                        "job_ids_snapshot": _job_ids_snapshot_for_run(
+                            cj=cj,
+                            image_dataset_id=image_dataset_id,
+                            text_dataset_id=text_dataset_id,
+                            topk_compiled_id=cj.get("topk_compiled_id"),
+                        ),
+                        "error": f"{type(e).__name__}: {e}",
+                    })
+                print(f"  ERROR: {model_name}: {type(e).__name__}: {e}")
 
     out_path = args.output
     if out_path is None:
