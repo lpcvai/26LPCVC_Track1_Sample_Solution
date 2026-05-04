@@ -40,10 +40,6 @@ def _resolve_dataset_ids(args):
         image_dataset_ids = [s.strip() for s in args.image_dataset_ids.split(",") if s.strip()]
     if not image_dataset_ids:
         image_dataset_ids = (JOB_IDS.data.get("image") or {}).get("dataset_ids") or None
-    if not image_dataset_ids:
-        if args.image_dataset_id is None:
-            args.image_dataset_id = JOB_IDS["image", "dataset_id"]
-        image_dataset_ids = [args.image_dataset_id] if args.image_dataset_id is not None else []
 
     if args.text_dataset_id is None:
         args.text_dataset_id = JOB_IDS["text", "dataset_id"]
@@ -60,7 +56,6 @@ def _resolve_dataset_ids(args):
             num_image_samples=int(args.num_images or NUM_IMAGE_SAMPLES),
             captions_per_image=CAPTIONS_PER_IMAGE,
         )
-        args.image_dataset_id = image_dataset_ids[0] if image_dataset_ids else None
         args.image_dataset_ids = ",".join(image_dataset_ids)
         args.text_dataset_id = text_dataset_id
 

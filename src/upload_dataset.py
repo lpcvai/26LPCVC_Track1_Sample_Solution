@@ -81,10 +81,9 @@ def upload_datasets(
         image_dataset_ids.append(ds.dataset_id)
         print(ds)
 
-    # Persist batched dataset IDs. Keep legacy `dataset_id` for older scripts (first batch).
+    # Persist batched dataset IDs.
     if persist_job_ids:
         JOB_IDS["image", "dataset_ids"] = image_dataset_ids
-        JOB_IDS["image", "dataset_id"] = image_dataset_ids[0] if image_dataset_ids else None
 
     # -----------------------------
     # Texts

@@ -34,9 +34,6 @@ def build_arg_parser():
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--model", choices=MODELS.keys(), help="Single model to compile and profile")
     group.add_argument("--all", action="store_true", help="Compile and profile all models")
-    parser.add_argument("--image-dataset-id", default=JOB_IDS["image", "dataset_id"],
-                        help="QAI Hub dataset ID for images (from upload_dataset.py). "
-                             "If omitted, uses job_ids.json.")
     parser.add_argument("--text-dataset-id", default=JOB_IDS["text", "dataset_id"],
                         help="QAI Hub dataset ID for texts  (from upload_dataset.py). "
                              "If omitted, uses job_ids.json.")
@@ -223,7 +220,9 @@ def compile_model(
             name=f"{prefix}topk-cosine",
         )
         if persist_job_ids:
-            JOB_IDS["topk", "compiled_id"] = topk_compile_job.job_id
+            compiled_ids = (JOB_IDS.data.get("topk") or {}).get("compiled_ids") or {}
+            compiled_ids["cosine"] = topk_compile_job.job_id
+            JOB_IDS["topk", "compiled_ids"] = compiled_ids
         print(f"  Compile job IDs — image: {image_compile_job.job_id}, text: {text_compile_job.job_id}, topk: {topk_compile_job.job_id}")
     else:
         print(f"  Compile job IDs — image: {image_compile_job.job_id}, text: {text_compile_job.job_id}")
@@ -295,7 +294,9 @@ def compile_faiss_index_model(
         name=f"{prefix}topk-faiss",
     )
     if persist_job_ids:
-        JOB_IDS["topk", "compiled_id"] = faiss_compile_job.job_id
+        compiled_ids = (JOB_IDS.data.get("topk") or {}).get("compiled_ids") or {}
+        compiled_ids["faiss"] = faiss_compile_job.job_id
+        JOB_IDS["topk", "compiled_ids"] = compiled_ids
     print(f"  FAISS compile job ID: {faiss_compile_job.job_id}")
     return {
         "topk_compiled_id": faiss_compile_job.job_id,

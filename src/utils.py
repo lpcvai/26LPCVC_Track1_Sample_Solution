@@ -73,17 +73,27 @@ class JobIds:
             self.data["text"].setdefault("compiled_id", None)
             self.data["text"].setdefault("dataset_id", None)
             self.data["image"].setdefault("compiled_id", None)
-            self.data["image"].setdefault("dataset_id", None)  # legacy single dataset id
-            self.data["image"].setdefault("dataset_ids", [])   # new: list of image dataset ids (batched)
-            self.data["topk"].setdefault("compiled_id", None)
+            # Images are always batched now; keep only dataset_ids.
+            self.data["image"].setdefault("dataset_ids", [])
+            # Top-k can have multiple compiled IDs (cosine vs faiss), so store a dict.
+            self.data["topk"].setdefault("compiled_ids", {})
+
+            # Remove legacy single-id fields if present to avoid accidental use.
+            if "dataset_id" in self.data["image"]:
+                self.data["image"].pop("dataset_id", None)
+            if "compiled_id" in self.data["topk"]:
+                # Migrate to compiled_ids, best-effort (assume cosine if unknown).
+                legacy = self.data["topk"].pop("compiled_id", None)
+                if legacy and "cosine" not in self.data["topk"]["compiled_ids"]:
+                    self.data["topk"]["compiled_ids"]["cosine"] = legacy
             # Ensure file is normalized to include new fields.
             self.save()
             return
 
         self.data = {
             "text": {"compiled_id": None, "dataset_id": None},
-            "image": {"compiled_id": None, "dataset_id": None, "dataset_ids": []},
-            "topk": {"compiled_id": None},
+            "image": {"compiled_id": None, "dataset_ids": []},
+            "topk": {"compiled_ids": {}},
         }
         # Ensure a valid initial file exists.
         self.save()

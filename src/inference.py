@@ -38,13 +38,13 @@ def build_arg_parser():
     parser.add_argument("--text-compiled-id", default=JOB_IDS["text", "compiled_id"],
                         help="Compile job ID for the text encoder (required for --topk cosine). "
                              "If omitted, uses job_ids.json.")
-    parser.add_argument("--topk-compiled-id", default=JOB_IDS["topk", "compiled_id"],
+    # Top-k may have multiple compiled ids (cosine vs faiss); user should pass --topk-compiled-id
+    # explicitly for inference.py, or rely on job_ids.json's topk.compiled_ids.<mode>.
+    parser.add_argument("--topk-compiled-id", default=None,
                         help="Compile job ID for the top-k model (topk_retrieval or faiss_index). "
-                             "If omitted, uses job_ids.json.")
-    parser.add_argument("--image-dataset-id", default=JOB_IDS["image", "dataset_id"],
-                        help="QAI Hub dataset ID for images. If omitted, uses job_ids.json.")
+                             "If omitted, uses job_ids.json based on --topk.")
     parser.add_argument("--image-dataset-ids", default=None,
-                        help="Comma-separated list of image dataset ids (batched). Overrides --image-dataset-id/job_ids.json.")
+                        help="Comma-separated list of image dataset ids (batched). Overrides job_ids.json.")
     parser.add_argument("--text-dataset-id", default=JOB_IDS["text", "dataset_id"],
                         help="QAI Hub dataset ID for texts (required for --topk cosine). If omitted, uses job_ids.json.")
     parser.add_argument("--topk", choices=["cosine", "faiss"], default="cosine",
@@ -253,17 +253,19 @@ def main(argv=None):
     if args.image_compiled_id is None:
         missing.append("--image-compiled-id")
     if args.topk_compiled_id is None:
-        missing.append("--topk-compiled-id")
+        # Resolve from job_ids.json: topk.compiled_ids[<mode>]
+        compiled_ids = (JOB_IDS.data.get("topk") or {}).get("compiled_ids") or {}
+        args.topk_compiled_id = compiled_ids.get(args.topk)
+        if args.topk_compiled_id is None:
+            missing.append("--topk-compiled-id")
     # Resolve batched image dataset ids.
     if args.image_dataset_ids:
         image_dataset_ids = [s.strip() for s in args.image_dataset_ids.split(",") if s.strip()]
     else:
-        image_dataset_ids = (JOB_IDS.data.get("image") or {}).get("dataset_ids") or None
-        if not image_dataset_ids:
-            image_dataset_ids = [args.image_dataset_id] if args.image_dataset_id is not None else []
+        image_dataset_ids = (JOB_IDS.data.get("image") or {}).get("dataset_ids") or []
 
     if not image_dataset_ids:
-        missing.append("--image-dataset-id/--image-dataset-ids")
+        missing.append("--image-dataset-ids")
     if args.topk == "cosine":
         if args.text_compiled_id is None:
             missing.append("--text-compiled-id")
