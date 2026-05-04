@@ -19,6 +19,7 @@ from utils import (
     IMAGES_PER_BATCH,
     MAX_INFERENCE_INFLIGHT,
     NUM_IMAGE_SAMPLES,
+    NUM_CALIBRATION_SAMPLES,
 )
 
 
@@ -34,12 +35,15 @@ def build_arg_parser():
     parser.add_argument("--faiss-compute-unit", choices=["all", "npu", "gpu", "cpu"], default="all",
                         help="Compute unit for FAISS compile and inference jobs (only applies with --topk faiss)")
     parser.add_argument("--quantize", action="store_true", help="Apply post-training quantization during compilation")
-    parser.add_argument("--quantize-type", default="int16", choices=["w4a8", "w8a16", "w4a16", "int8", "int16"],
+    parser.add_argument("--quantize-type", default="int8", choices=["w4a8", "w8a16", "w4a16", "int8", "int16"],
                         help="Quantization type (only applies with --quantize)")
     parser.add_argument("--image-calibration-id", default=None,
                         help="QAI Hub dataset ID for image calibration data (required for --quantize)")
     parser.add_argument("--text-calibration-id", default=None,
                         help="QAI Hub dataset ID for text calibration data (required for --quantize)")
+    parser.add_argument("--calibration-samples", type=int, default=None,
+                        help=f"Number of validation samples to use for quantization calibration "
+                             f"(default from utils.py: {NUM_CALIBRATION_SAMPLES}).")
     parser.add_argument("--images-per-batch", type=int, default=None,
                         help=f"Images per uploaded dataset and per image-encoder inference job (default: {IMAGES_PER_BATCH}).")
     parser.add_argument("--max-inflight", type=int, default=None,
@@ -61,7 +65,7 @@ def _dataset_profile(model_name: str) -> str:
     Produce a small signature for the model's preprocess+tokenizer, so models with identical
     input requirements can reuse the same uploaded datasets.
     """
-    # Import lazily so importing experiments.py doesn't require deps unless executed.
+    # Import lazily, so importing experiments.py doesn't require deps unless executed.
     import open_clip  # type: ignore
     import torchvision.transforms as T  # type: ignore
 
@@ -85,11 +89,21 @@ def _dataset_profile(model_name: str) -> str:
     return f"mean={mean},std={std},tok_shape={shape},tok_dtype={dtype}"
 
 
-def _upload_datasets_for_models(models: list[str], *, images_per_batch: int, num_images: int):
+def _upload_datasets_for_models(
+    models: list[str],
+    *,
+    images_per_batch: int,
+    num_images: int,
+    quantize: bool,
+    image_calibration_id: str | None,
+    text_calibration_id: str | None,
+    calibration_samples: int,
+):
     """
     Upload datasets per distinct (preprocess, tokenizer) profile, then map each model -> datasets.
     """
     from upload_dataset import upload_datasets
+    from upload_calibration import upload_calibration_datasets
 
     profile_to_datasets: dict[str, dict] = {}
     model_to_datasets: dict[str, dict] = {}
@@ -107,16 +121,30 @@ def _upload_datasets_for_models(models: list[str], *, images_per_batch: int, num
                 num_image_samples=num_images,
                 captions_per_image=CAPTIONS_PER_IMAGE,
             )
+            calib = None
+            if quantize:
+                if image_calibration_id and text_calibration_id:
+                    calib = {"image_calibration_id": image_calibration_id, "text_calibration_id": text_calibration_id}
+                else:
+                    # Upload calibration datasets once per profile and reuse them for all models sharing that profile.
+                    print(f"\nUploading calibration datasets for: {model_name} (num_samples={calibration_samples})")
+                    img_cal_id, txt_cal_id = upload_calibration_datasets(
+                        model_name,
+                        num_samples=calibration_samples,
+                    )
+                    calib = {"image_calibration_id": img_cal_id, "text_calibration_id": txt_cal_id}
             profile_to_datasets[profile] = {
                 "image_dataset_ids": image_dataset_ids,
                 "text_dataset_id": text_dataset_id,
                 "representative_model": model_name,
+                "calibration": calib,
             }
         ds = profile_to_datasets[profile]
         model_to_datasets[model_name] = {
             "profile": profile,
             "image_dataset_ids": ds["image_dataset_ids"],
             "text_dataset_id": ds["text_dataset_id"],
+            "calibration": ds.get("calibration"),
         }
 
     return model_to_datasets, profile_to_datasets
@@ -158,12 +186,22 @@ def main(argv=None):
     images_per_batch = int(args.images_per_batch or IMAGES_PER_BATCH)
     max_inflight = int(args.max_inflight or MAX_INFERENCE_INFLIGHT)
     topk_modes = _iter_topk_modes(args.topk)
+    calibration_samples = int(args.calibration_samples or NUM_CALIBRATION_SAMPLES)
 
     model_to_datasets, profile_to_datasets = _upload_datasets_for_models(
         models,
         images_per_batch=images_per_batch,
         num_images=num_images,
+        quantize=bool(args.quantize),
+        image_calibration_id=getattr(args, "image_calibration_id", None),
+        text_calibration_id=getattr(args, "text_calibration_id", None),
+        calibration_samples=calibration_samples,
     )
+
+    # Avoid clobbering ONNX artifacts when multiple experiments are run concurrently by
+    # exporting/compiling into a run-specific directory.
+    run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    onnx_root = os.path.join(RESULTS_PATH, "onnx_experiments", run_id)
 
     if args.export_onnx:
         # Ensure ONNX artifacts match current NUM_IMAGE_SAMPLES / expected topk batch size.
@@ -185,10 +223,11 @@ def main(argv=None):
                     str(num_images),
                     "--images-per-batch",
                     str(num_images),
+                    "--onnx-root",
+                    onnx_root,
                 ],
                 check=True,
             )
-
     results = {
         "timestamp": datetime.now().isoformat(timespec="seconds"),
         "device": args.device,
@@ -224,8 +263,9 @@ def main(argv=None):
             profile=False,
             quantize=args.quantize,
             quantize_type=args.quantize_type,
-            image_calibration_id=args.image_calibration_id,
-            text_calibration_id=args.text_calibration_id,
+            image_calibration_id=((model_to_datasets.get(model_name) or {}).get("calibration") or {}).get("image_calibration_id"),
+            text_calibration_id=((model_to_datasets.get(model_name) or {}).get("calibration") or {}).get("text_calibration_id"),
+            onnx_root=onnx_root,
         )
 
         try:

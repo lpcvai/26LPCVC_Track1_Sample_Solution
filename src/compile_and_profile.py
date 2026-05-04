@@ -41,14 +41,16 @@ def build_arg_parser():
                         help="QAI Hub dataset ID for texts  (from upload_dataset.py). "
                              "If omitted, uses job_ids.json.")
     parser.add_argument("--device", default="XR2 Gen 2 (Proxy)", help="QAI Hub target device")
+    parser.add_argument("--onnx-root", default=os.path.join(RESULTS_PATH, "onnx"),
+                        help="Root directory where ONNX artifacts live (default: <results_path>/onnx).")
     parser.add_argument("--topk", choices=["cosine", "faiss"], default="cosine",
                         help="How to compute top-k on the QAS device: cosine(default) or via FAISS")
     parser.add_argument("--faiss-compute-unit", choices=["all", "npu", "gpu", "cpu"], default="all",
                         help="Compute unit for FAISS compile and inference jobs (only applies with --topk faiss)")
     parser.add_argument("--profile", action="store_true", help="Submit profile jobs after recall is computed")
     parser.add_argument("--quantize", action="store_true", help="Apply post-training quantization during compilation")
-    parser.add_argument("--quantize-type", default="int16", choices=["w4a8", "w8a16", "w4a16", "int8", "int16"],
-                        help="Quantization type (only applies with --quantize)")
+    parser.add_argument("--quantize-type", default="int8", choices=["w4a8", "w8a16", "w4a16", "int8", "int16"],
+                        help="Quantization type (only applies with --quantize; uses Quantize Job API)")
     parser.add_argument("--image-calibration-id", default=None,
                         help="QAI Hub dataset ID for image calibration data (from upload_calibration.py)")
     parser.add_argument("--text-calibration-id", default=None,
@@ -112,6 +114,9 @@ def compile_model(
     topk: str,
     faiss_compute_unit: str,
     persist_job_ids: bool = True,
+    job_name_prefix: str = "",
+    quantize: bool = False,
+    quantize_type: str = "int16",
 ):
     """Submit compile jobs and persist compile job IDs to job_ids.json.
 
@@ -119,19 +124,68 @@ def compile_model(
     completion. Downstream steps should use the returned job IDs.
     """
     print("  Submitting compile jobs...")
+    prefix = (job_name_prefix.strip() + " ") if job_name_prefix and job_name_prefix.strip() else ""
+
+    # Quantize Job API (preferred) – replaces deprecated --quantize_full_type.
+    quantized_img = onnx_img
+    quantized_txt = onnx_txt
+    if quantize:
+        if image_calib_dataset is None or text_calib_dataset is None:
+            raise ValueError("quantize=True requires image_calib_dataset and text_calib_dataset")
+
+        qt = str(quantize_type).lower()
+        if qt == "int8":
+            w_dtype = qai_hub.QuantizeDtype.INT8
+            a_dtype = qai_hub.QuantizeDtype.INT8
+        elif qt == "int16":
+            w_dtype = qai_hub.QuantizeDtype.INT16
+            a_dtype = qai_hub.QuantizeDtype.INT16
+        elif qt == "w4a8":
+            w_dtype = qai_hub.QuantizeDtype.INT4
+            a_dtype = qai_hub.QuantizeDtype.INT8
+        elif qt == "w4a16":
+            w_dtype = qai_hub.QuantizeDtype.INT4
+            a_dtype = qai_hub.QuantizeDtype.INT16
+        elif qt == "w8a16":
+            w_dtype = qai_hub.QuantizeDtype.INT8
+            a_dtype = qai_hub.QuantizeDtype.INT16
+        else:
+            raise ValueError(f"Unsupported quantize_type for Quantize Job API: {quantize_type}")
+
+        print("  Submitting quantize jobs...")
+        q_img = qai_hub.submit_quantize_job(
+            onnx_img,
+            calibration_data=image_calib_dataset,
+            weights_dtype=w_dtype,
+            activations_dtype=a_dtype,
+            name=f"{prefix}quantize :: image-encoder",
+        )
+        q_txt = qai_hub.submit_quantize_job(
+            onnx_txt,
+            calibration_data=text_calib_dataset,
+            weights_dtype=w_dtype,
+            activations_dtype=a_dtype,
+            name=f"{prefix}quantize :: text-encoder",
+        )
+        # Block until quantization completes, then compile the quantized ONNX model artifacts.
+        quantized_img = q_img.get_target_model()
+        quantized_txt = q_txt.get_target_model()
+        if quantized_img is None or quantized_txt is None:
+            raise RuntimeError("Quantize job failed to produce a target model.")
+
     image_compile_job = qai_hub.submit_compile_job(
-        model=onnx_img,
+        model=quantized_img,
         device=target_device,
         input_specs=get_input_specs(onnx_img),
         options=compile_options,
-        calibration_data=image_calib_dataset,
+        name=f"{prefix}image-encoder",
     )
     text_compile_job = qai_hub.submit_compile_job(
-        model=onnx_txt,
+        model=quantized_txt,
         device=target_device,
         input_specs=get_input_specs(onnx_txt),
         options=compile_options,
-        calibration_data=text_calib_dataset,
+        name=f"{prefix}text-encoder",
     )
     if persist_job_ids:
         JOB_IDS["image", "compiled_id"] = image_compile_job.job_id
@@ -144,6 +198,7 @@ def compile_model(
             device=target_device,
             input_specs=get_input_specs(onnx_topk),
             options=compile_options,
+            name=f"{prefix}topk-cosine",
         )
         if persist_job_ids:
             JOB_IDS["topk", "compiled_id"] = topk_compile_job.job_id
@@ -209,11 +264,13 @@ def compile_faiss_index_model(
     if onnx_faiss is None:
         return None
 
+    prefix = (job_name_prefix.strip() + " ") if job_name_prefix and job_name_prefix.strip() else ""
     faiss_compile_job = qai_hub.submit_compile_job(
         model=onnx_faiss,
         device=target_device,
         input_specs=get_input_specs(onnx_faiss),
         options=f"--target_runtime qnn_dlc --compute_unit {faiss_compute_unit}",
+        name=f"{prefix}topk-faiss",
     )
     if persist_job_ids:
         JOB_IDS["topk", "compiled_id"] = faiss_compile_job.job_id
@@ -229,8 +286,7 @@ def run_pipeline(args, *, persist_job_ids: bool = True):
         parser.error("--quantize requires --image-calibration-id and --text-calibration-id")
 
     compile_options = "--target_runtime qnn_dlc"
-    if args.quantize:
-        compile_options += f" --quantize_full_type {args.quantize_type}"
+    # Quantization is handled via submit_quantize_job (Quantize Job API). No compile flag needed.
 
     image_calib_dataset = qai_hub.get_dataset(args.image_calibration_id) if args.quantize else None
     text_calib_dataset = qai_hub.get_dataset(args.text_calibration_id) if args.quantize else None
@@ -247,7 +303,7 @@ def run_pipeline(args, *, persist_job_ids: bool = True):
         print(f"Model: {model_name}")
         print(f"{'─' * 60}")
 
-        onnx_dir = os.path.join(RESULTS_PATH, "onnx", model_name)
+        onnx_dir = os.path.join(args.onnx_root, model_name)
         image_onnx_path = os.path.join(onnx_dir, "image_encoder.onnx")
         text_onnx_path = os.path.join(onnx_dir, "text_encoder.onnx")
         topk_onnx_path = os.path.join(onnx_dir, "topk_retrieval.onnx")
@@ -278,6 +334,9 @@ def run_pipeline(args, *, persist_job_ids: bool = True):
                 topk=args.topk,
                 faiss_compute_unit=args.faiss_compute_unit,
                 persist_job_ids=persist_job_ids,
+                job_name_prefix=f"{model_name} :: ",
+                quantize=bool(args.quantize),
+                quantize_type=args.quantize_type,
             ),
         }
 

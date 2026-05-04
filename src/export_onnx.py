@@ -19,6 +19,8 @@ parser.add_argument("--num-images", type=int, default=NUM_IMAGE_SAMPLES,
 parser.add_argument("--images-per-batch", type=int, default=NUM_IMAGE_SAMPLES,
                     help="Number of image embeddings per top-k inference batch. "
                          "Default is NUM_IMAGE_SAMPLES (i.e., run top-k in one shot).")
+parser.add_argument("--onnx-root", default=os.path.join(RESULTS_PATH, "onnx"),
+                    help="Root directory to write ONNX artifacts into (default: <results_path>/onnx).")
 args = parser.parse_args()
 
 device = torch.device("cpu")  # use CPU to avoid GPU device issues during export
@@ -56,7 +58,7 @@ class TopKWrapper(torch.nn.Module):
 
 
 def export_model(model_name: str, pretrained: str):
-    onnx_dir = os.path.join(RESULTS_PATH, "onnx", model_name)
+    onnx_dir = os.path.join(args.onnx_root, model_name)
     os.makedirs(onnx_dir, exist_ok=True)
     print(f"\n── {model_name} ──")
     print(f"Loading model (pretrained={pretrained})...")
