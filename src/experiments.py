@@ -475,6 +475,7 @@ def main(argv=None):
                 persist_job_ids=False,
                 text_embs=text_embs,
                 job_name_prefix=f"{prefix}{model_name} ::",
+                images_per_batch=num_images,
             )
             if not faiss_compile or not faiss_compile.get("topk_compiled_id"):
                 raise RuntimeError("FAISS index compile did not return a topk_compiled_id")

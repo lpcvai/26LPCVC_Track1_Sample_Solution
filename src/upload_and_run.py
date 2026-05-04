@@ -92,6 +92,7 @@ def main(argv=None):
             text_dataset=text_dataset,
             onnx_dir=cj["onnx_dir"],
             faiss_compute_unit=args.faiss_compute_unit,
+            images_per_batch=int(args.num_images or NUM_IMAGE_SAMPLES),
         )
         if faiss is None:
             raise SystemExit("Failed to compile FAISS index model.")
