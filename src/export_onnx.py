@@ -5,7 +5,7 @@ import open_clip
 import torch
 from timm.utils import reparameterize_model
 
-from utils import MODELS, RESULTS_PATH, NUM_IMAGE_SAMPLES, CAPTIONS_PER_IMAGE, K
+from utils import MODELS, RESULTS_PATH, NUM_IMAGE_SAMPLES, CAPTIONS_PER_IMAGE, K, TOPK_IMAGES_PER_BATCH
 
 parser = argparse.ArgumentParser()
 group = parser.add_mutually_exclusive_group(required=True)
@@ -16,9 +16,9 @@ parser.add_argument("--image-size", type=int, default=224,
 parser.add_argument("--num-images", type=int, default=NUM_IMAGE_SAMPLES,
                     help="Total number of images in the evaluation dataset. Used to size the top-k text embedding input "
                          "(num_images * captions_per_image).")
-parser.add_argument("--images-per-batch", type=int, default=NUM_IMAGE_SAMPLES,
+parser.add_argument("--images-per-batch", type=int, default=TOPK_IMAGES_PER_BATCH,
                     help="Number of image embeddings per top-k inference batch. "
-                         "Default is NUM_IMAGE_SAMPLES (i.e., run top-k in one shot).")
+                         "Default is TOPK_IMAGES_PER_BATCH.")
 parser.add_argument("--onnx-root", default=os.path.join(RESULTS_PATH, "onnx"),
                     help="Root directory to write ONNX artifacts into (default: <results_path>/onnx).")
 args = parser.parse_args()

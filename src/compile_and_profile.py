@@ -48,7 +48,16 @@ def build_arg_parser():
     parser.add_argument("--faiss-compute-unit", choices=["all", "npu", "gpu", "cpu"], default="all",
                         help="Compute unit for FAISS compile and inference jobs (only applies with --topk faiss)")
     parser.add_argument("--profile", action="store_true", help="Submit profile jobs after recall is computed")
-    parser.add_argument("--quantize", action="store_true", help="Apply post-training quantization during compilation")
+    # Optional arg:
+    #   no flag => no quantization
+    #   --quantize           => quantize both encoders
+    #   --quantize both      => quantize both encoders
+    #   --quantize image     => quantize only image encoder
+    #   --quantize text      => quantize only text encoder
+    parser.add_argument("--quantize", nargs="?", const="both", default=None,
+                        choices=["both", "image", "text"],
+                        help="Apply post-training quantization during compilation. "
+                             "Usage: --quantize (same as --quantize both), --quantize image, --quantize text.")
     parser.add_argument("--quantize-type", default="int8", choices=["w4a8", "w8a16", "w4a16", "int8", "int16"],
                         help="Quantization type (only applies with --quantize; uses Quantize Job API)")
     parser.add_argument("--image-calibration-id", default=None,
@@ -117,6 +126,7 @@ def compile_model(
     job_name_prefix: str = "",
     quantize: bool = False,
     quantize_type: str = "int16",
+    quantize_target: str = "both",
 ):
     """Submit compile jobs and persist compile job IDs to job_ids.json.
 
@@ -132,6 +142,9 @@ def compile_model(
     if quantize:
         if image_calib_dataset is None or text_calib_dataset is None:
             raise ValueError("quantize=True requires image_calib_dataset and text_calib_dataset")
+        qtgt = (quantize_target or "both").lower().strip()
+        if qtgt not in ("both", "image", "text"):
+            raise ValueError(f"Invalid quantize_target: {quantize_target}")
 
         qt = str(quantize_type).lower()
         if qt == "int8":
@@ -153,25 +166,34 @@ def compile_model(
             raise ValueError(f"Unsupported quantize_type for Quantize Job API: {quantize_type}")
 
         print("  Submitting quantize jobs...")
-        q_img = qai_hub.submit_quantize_job(
-            onnx_img,
-            calibration_data=image_calib_dataset,
-            weights_dtype=w_dtype,
-            activations_dtype=a_dtype,
-            name=f"{prefix}quantize :: image-encoder",
-        )
-        q_txt = qai_hub.submit_quantize_job(
-            onnx_txt,
-            calibration_data=text_calib_dataset,
-            weights_dtype=w_dtype,
-            activations_dtype=a_dtype,
-            name=f"{prefix}quantize :: text-encoder",
-        )
+        q_img = None
+        q_txt = None
+        if qtgt in ("both", "image"):
+            q_img = qai_hub.submit_quantize_job(
+                onnx_img,
+                calibration_data=image_calib_dataset,
+                weights_dtype=w_dtype,
+                activations_dtype=a_dtype,
+                name=f"{prefix}quantize :: image-encoder",
+            )
+        if qtgt in ("both", "text"):
+            q_txt = qai_hub.submit_quantize_job(
+                onnx_txt,
+                calibration_data=text_calib_dataset,
+                weights_dtype=w_dtype,
+                activations_dtype=a_dtype,
+                name=f"{prefix}quantize :: text-encoder",
+            )
+
         # Block until quantization completes, then compile the quantized ONNX model artifacts.
-        quantized_img = q_img.get_target_model()
-        quantized_txt = q_txt.get_target_model()
-        if quantized_img is None or quantized_txt is None:
-            raise RuntimeError("Quantize job failed to produce a target model.")
+        if q_img is not None:
+            quantized_img = q_img.get_target_model()
+            if quantized_img is None:
+                raise RuntimeError("Quantize job (image) failed to produce a target model.")
+        if q_txt is not None:
+            quantized_txt = q_txt.get_target_model()
+            if quantized_txt is None:
+                raise RuntimeError("Quantize job (text) failed to produce a target model.")
 
     image_compile_job = qai_hub.submit_compile_job(
         model=quantized_img,
@@ -335,8 +357,9 @@ def run_pipeline(args, *, persist_job_ids: bool = True):
                 faiss_compute_unit=args.faiss_compute_unit,
                 persist_job_ids=persist_job_ids,
                 job_name_prefix=f"{model_name} :: ",
-                quantize=bool(args.quantize),
+                quantize=(args.quantize is not None),
                 quantize_type=args.quantize_type,
+                quantize_target=(args.quantize or "both"),
             ),
         }
 

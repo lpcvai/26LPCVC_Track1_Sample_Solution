@@ -19,6 +19,9 @@ NUM_IMAGE_SAMPLES = 1000
 # When NUM_IMAGE_SAMPLES is large, uploading/running inference on a single image dataset can exceed
 # QAI Hub's 2GB flatbuffer limit. Upload images in batches and run multiple inference jobs.
 IMAGES_PER_BATCH = 1000
+# When running top-k on-device, the full (N_images x N_text) similarity can exceed max runtime
+# for large N. Run top-k over image embeddings in chunks of this size.
+TOPK_IMAGES_PER_BATCH = 1000
 # When running many batched inference jobs, limit how many we keep in-flight at once
 # to avoid hammering the Hub API while still keeping throughput decent.
 MAX_INFERENCE_INFLIGHT = 2

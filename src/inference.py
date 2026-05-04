@@ -4,7 +4,7 @@ import time
 import numpy as np
 import qai_hub
 
-from utils import CAPTIONS_PER_IMAGE, JOB_IDS
+from utils import CAPTIONS_PER_IMAGE, JOB_IDS, TOPK_IMAGES_PER_BATCH
 from utils import MAX_INFERENCE_INFLIGHT
 from utils import IMAGES_PER_BATCH
 
@@ -56,6 +56,8 @@ def build_arg_parser():
                         help="Optional prefix for QAI Hub job names to make jobs easier to identify in the UI.")
     parser.add_argument("--max-inflight", type=int, default=None,
                         help=f"Max number of inference jobs to keep in-flight when batching (default: {MAX_INFERENCE_INFLIGHT}).")
+    parser.add_argument("--topk-images-per-batch", type=int, default=None,
+                        help=f"Images per top-k inference job (default from utils.py: {TOPK_IMAGES_PER_BATCH}).")
     return parser
 
 
@@ -71,6 +73,7 @@ def run_inference(
     text_dataset_id: str | None = None,
     job_name_prefix: str = "",
     max_inference_inflight: int = 2,
+    topk_images_per_batch: int | None = None,
 ):
     missing = []
     if image_compiled_id is None:
@@ -170,27 +173,68 @@ def run_inference(
 
     # ── Top-k inference ─────────────────────────────────────────────────────
     total_images = image_embs.shape[0]
-    topk_in = image_embs
 
-    print("Submitting top-k inference...")
-    if topk == "cosine":
-        topk_dataset = qai_hub.upload_dataset({"image_embs": [topk_in], "text_embs": [text_embs]})
-        topk_inf_job = qai_hub.submit_inference_job(
-            model=topk_compiled,
-            device=target_device,
-            inputs=topk_dataset,
-            name=f"{prefix}topk-cosine",
-        )
-    else:
-        topk_dataset = qai_hub.upload_dataset({"image_embs": [topk_in]})
-        topk_inf_job = qai_hub.submit_inference_job(
-            model=topk_compiled,
-            device=target_device,
-            inputs=topk_dataset,
-            options=f"--compute_unit {faiss_compute_unit}",
-            name=f"{prefix}topk-faiss",
-        )
-    topk_indices = first_output(topk_inf_job)[0]
+    topk_batch = int(topk_images_per_batch or TOPK_IMAGES_PER_BATCH)
+    if topk_batch <= 0:
+        raise ValueError(f"Invalid topk batch size: {topk_batch}")
+
+    num_topk_batches = (total_images + topk_batch - 1) // topk_batch
+    print(f"Submitting top-k inference (mode={topk}, batch_size={topk_batch}, batches={num_topk_batches})...")
+
+    topk_max_inflight = max(1, int(max_inference_inflight))
+    pending = list(range(num_topk_batches))
+    active: list[tuple[int, int, qai_hub.InferenceJob]] = []  # (bi, valid, job)
+    results_by_batch: dict[int, np.ndarray] = {}
+
+    def _submit_one(bi: int):
+        start = bi * topk_batch
+        end = min(total_images, start + topk_batch)
+        chunk = image_embs[start:end]
+        valid = int(chunk.shape[0])
+        if valid < topk_batch:
+            pad = np.zeros((topk_batch - valid, chunk.shape[1]), dtype=chunk.dtype)
+            chunk = np.concatenate([chunk, pad], axis=0)
+
+        if topk == "cosine":
+            topk_dataset = qai_hub.upload_dataset({"image_embs": [chunk], "text_embs": [text_embs]})
+            job = qai_hub.submit_inference_job(
+                model=topk_compiled,
+                device=target_device,
+                inputs=topk_dataset,
+                name=f"{prefix}topk-cosine {bi + 1}/{num_topk_batches}",
+            )
+        else:
+            topk_dataset = qai_hub.upload_dataset({"image_embs": [chunk]})
+            job = qai_hub.submit_inference_job(
+                model=topk_compiled,
+                device=target_device,
+                inputs=topk_dataset,
+                options=f"--compute_unit {faiss_compute_unit}",
+                name=f"{prefix}topk-faiss {bi + 1}/{num_topk_batches}",
+            )
+        active.append((bi, valid, job))
+
+    while pending or active:
+        while pending and len(active) < topk_max_inflight:
+            _submit_one(pending.pop(0))
+
+        progressed = False
+        still_active: list[tuple[int, int, qai_hub.InferenceJob]] = []
+        for bi, valid, job in active:
+            st = job.get_status()
+            if st.running or st.pending:
+                still_active.append((bi, valid, job))
+                continue
+            out = first_output(job)[0]
+            results_by_batch[bi] = out[:valid]
+            progressed = True
+        active = still_active
+
+        if not progressed and active:
+            time.sleep(2)
+
+    parts = [results_by_batch[i] for i in range(num_topk_batches)]
+    topk_indices = np.concatenate(parts, axis=0) if parts else np.zeros((0, 0), dtype=np.int64)
 
     # ── Recall@10 ───────────────────────────────────────────────────────────
     N = image_embs.shape[0]
@@ -243,6 +287,7 @@ def main(argv=None):
         text_dataset_id=args.text_dataset_id,
         job_name_prefix=args.job_name_prefix,
         max_inference_inflight=int(args.max_inflight or MAX_INFERENCE_INFLIGHT),
+        topk_images_per_batch=args.topk_images_per_batch,
     )
     print(f"Recall@10: {recall_at_10:.4f}  ({recall_at_10 * 100:.2f}%)")
 
