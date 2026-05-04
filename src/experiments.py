@@ -6,10 +6,14 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import compile_and_profile
 import numpy as np
+import open_clip  # type: ignore
 import qai_hub
 import time
 import qai_hub.public_rest_api as hub_api
+import torchvision.transforms as T  # type: ignore
 from export_onnx import export_models
+from upload_calibration import upload_calibration_datasets
+from upload_dataset import upload_datasets
 
 from utils import (
     MODELS,
@@ -72,10 +76,6 @@ def _dataset_profile(model_name: str) -> str:
     Produce a small signature for the model's preprocess+tokenizer, so models with identical
     input requirements can reuse the same uploaded datasets.
     """
-    # Import lazily, so importing experiments.py doesn't require deps unless executed.
-    import open_clip  # type: ignore
-    import torchvision.transforms as T  # type: ignore
-
     pretrained = MODEL_PRETRAINED[model_name]
     # Force preprocessing to output 224x224 to match our ONNX export + Hub compile input specs.
     _, _, preprocess = open_clip.create_model_and_transforms(model_name, pretrained=pretrained, force_image_size=224)
@@ -111,9 +111,6 @@ def _upload_datasets_for_models(
     """
     Upload datasets per distinct (preprocess, tokenizer) profile, then map each model -> datasets.
     """
-    from upload_dataset import upload_datasets
-    from upload_calibration import upload_calibration_datasets
-
     profile_to_datasets: dict[str, dict] = {}
     model_to_datasets: dict[str, dict] = {}
     for model_name in models:

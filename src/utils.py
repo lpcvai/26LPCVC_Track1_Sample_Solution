@@ -69,7 +69,6 @@ TOPK_IMAGES_PER_BATCH = 1000
 # to avoid hammering the Hub API while still keeping throughput decent.
 MAX_INFERENCE_INFLIGHT = 2
 CAPTIONS_PER_IMAGE = 5
-NUM_TEXT_SAMPLES = NUM_IMAGE_SAMPLES * CAPTIONS_PER_IMAGE
 K = 10
 NUM_CALIBRATION_SAMPLES = 200
 
@@ -177,6 +176,6 @@ class JobIds:
 
 JOB_IDS = JobIds("job_ids.json")
 
-# Local cache of uploaded dataset metadata (ids, names, expiration, image range).
+# Local cache of uploaded dataset metadata (id, name, expiration, and a stable content key).
 # The registry prunes expired/invalid entries on load.
 DATASETS = DatasetRegistry("datasets.json")

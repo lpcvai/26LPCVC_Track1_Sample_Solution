@@ -8,15 +8,47 @@ from dataset_registry import DatasetInfo
 from utils import DATASETS
 
 
-def _to_utc(dt: datetime | None) -> datetime | None:
-    if dt is None:
-        return None
-    if dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
+def try_resolve_cached_dataset_id(*, key: str, cache: bool = True, cache_write: bool = True) -> str | None:
+    """
+    Resolve a dataset id from datasets.json by cache key.
 
-def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    Returns dataset_id if present and valid, else None.
+    """
+    if not cache or not key:
+        return None
+
+    DATASETS.load()
+    existing = DATASETS.find_by_key(key)
+    if existing is None:
+        return None
+
+    now = datetime.now(timezone.utc)
+    if existing.expiration_time is not None and existing.expiration_time > (now + timedelta(minutes=5)):
+        return existing.dataset_id
+
+    try:
+        remote = qai_hub.get_dataset(existing.dataset_id)
+        if remote.is_expired():
+            return None
+        exp = getattr(remote, "expiration_time", None)
+        if exp is not None:
+            if getattr(exp, "tzinfo", None) is None:
+                exp = exp.replace(tzinfo=timezone.utc)
+            else:
+                exp = exp.astimezone(timezone.utc)
+        refreshed = DatasetInfo(
+            dataset_id=remote.dataset_id,
+            name=getattr(remote, "name", None),
+            expiration_time=exp,
+            key=existing.key,
+            kind=existing.kind,
+            meta=existing.meta,
+        )
+        if cache_write:
+            DATASETS.upsert(refreshed)
+        return existing.dataset_id
+    except Exception:
+        return None
 
 
 def get_or_upload_dataset(
@@ -43,38 +75,21 @@ def get_or_upload_dataset(
     DATASETS.load()
 
     if cache and cacheable and key:
-        existing = DATASETS.find_by_key(key)
-        if existing is not None:
-            # Prefer trusting local expiration_time to avoid API calls that can fail and
-            # cause unnecessary re-uploads. Only revalidate against Hub when missing or
-            # close to expiry.
-            now = _utc_now()
-            if existing.expiration_time is not None and existing.expiration_time > (now + timedelta(minutes=5)):
-                return existing.dataset_id
-
-            try:
-                remote = qai_hub.get_dataset(existing.dataset_id)
-                if not remote.is_expired():
-                    refreshed = DatasetInfo(
-                        dataset_id=remote.dataset_id,
-                        name=getattr(remote, "name", None),
-                        expiration_time=_to_utc(getattr(remote, "expiration_time", None)),
-                        key=existing.key,
-                        kind=existing.kind,
-                        meta=existing.meta,
-                    )
-                    if cache_write and cacheable:
-                        DATASETS.upsert(refreshed)
-                    return existing.dataset_id
-            except Exception:
-                # If lookup fails, fall through to upload a new dataset.
-                pass
+        cached_id = try_resolve_cached_dataset_id(key=key, cache=cache, cache_write=(cache_write and cacheable))
+        if cached_id is not None:
+            return cached_id
 
     ds = qai_hub.upload_dataset(data, name=name) if name is not None else qai_hub.upload_dataset(data)
+    exp = getattr(ds, "expiration_time", None)
+    if exp is not None:
+        if getattr(exp, "tzinfo", None) is None:
+            exp = exp.replace(tzinfo=timezone.utc)
+        else:
+            exp = exp.astimezone(timezone.utc)
     info = DatasetInfo(
         dataset_id=ds.dataset_id,
         name=getattr(ds, "name", name),
-        expiration_time=_to_utc(getattr(ds, "expiration_time", None)),
+        expiration_time=exp,
         key=key,
         kind=kind,
         meta=meta,

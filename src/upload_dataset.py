@@ -1,18 +1,17 @@
 import argparse
 import io
 import urllib.request
-from datetime import datetime, timezone, timedelta
 
 import numpy as np
 import open_clip
-import qai_hub
 import torch.nn.functional as F
+import torchvision.transforms as T  # type: ignore
 from PIL import Image
 from datasets import load_dataset
 from tqdm import tqdm
 
-from dataset_store import get_or_upload_dataset
-from utils import MODELS, MODEL_PRETRAINED, NUM_IMAGE_SAMPLES, CAPTIONS_PER_IMAGE, JOB_IDS, IMAGES_PER_BATCH, DATASETS
+from dataset_store import get_or_upload_dataset, try_resolve_cached_dataset_id
+from utils import MODELS, MODEL_PRETRAINED, NUM_IMAGE_SAMPLES, CAPTIONS_PER_IMAGE, JOB_IDS, IMAGES_PER_BATCH
 
 
 def upload_datasets(
@@ -44,16 +43,11 @@ def upload_datasets(
     mean = None
     std = None
     transforms = getattr(preprocess, "transforms", None) or []
-    try:
-        import torchvision.transforms as T  # type: ignore
-        for tr in transforms:
-            if isinstance(tr, T.Normalize):
-                mean = tuple(float(x) for x in tr.mean)
-                std = tuple(float(x) for x in tr.std)
-                break
-    except Exception:
-        # If torchvision isn't available (or transforms aren't inspectable), fall back to unknown.
-        pass
+    for tr in transforms:
+        if isinstance(tr, T.Normalize):
+            mean = tuple(float(x) for x in tr.mean)
+            std = tuple(float(x) for x in tr.std)
+            break
 
     tok_shape = None
     tok_dtype = None
@@ -64,13 +58,9 @@ def upload_datasets(
     except Exception:
         pass
 
-    def _fmt_floats(xs):
-        if xs is None:
-            return "None"
-        # Canonical formatting: fixed precision, no spaces.
-        return "[" + ",".join(f"{float(x):.8f}".rstrip("0").rstrip(".") for x in xs) + "]"
-
-    preproc_sig = f"img224:mean={_fmt_floats(mean)}:std={_fmt_floats(std)}"
+    fmt_mean = "None" if mean is None else "[" + ",".join(f"{float(x):.8f}".rstrip("0").rstrip(".") for x in mean) + "]"
+    fmt_std = "None" if std is None else "[" + ",".join(f"{float(x):.8f}".rstrip("0").rstrip(".") for x in std) + "]"
+    preproc_sig = f"img224:mean={fmt_mean}:std={fmt_std}"
     tok_sig = f"shape={tok_shape}:dtype={tok_dtype}"
 
     if num_image_samples <= 0:
@@ -91,39 +81,6 @@ def upload_datasets(
     # as part of the cache identity.
     base_key = f"coco-karpathy:{split_name}:firstN={num_image_samples}:preproc={preproc_sig}"
 
-    def _try_resolve_cached_id(key: str) -> str | None:
-        if not cache:
-            return None
-        DATASETS.load()
-        existing = DATASETS.find_by_key(key)
-        if existing is None:
-            return None
-        now = datetime.now(timezone.utc)
-        if existing.expiration_time is not None and existing.expiration_time > (now + timedelta(minutes=5)):
-            return existing.dataset_id
-        try:
-            remote = qai_hub.get_dataset(existing.dataset_id)
-            if not remote.is_expired():
-                # Refresh cache metadata opportunistically.
-                from dataset_registry import DatasetInfo  # local import to avoid cycles
-                exp = getattr(remote, "expiration_time", None)
-                if exp is not None and getattr(exp, "tzinfo", None) is None:
-                    exp = exp.replace(tzinfo=timezone.utc)
-                refreshed = DatasetInfo(
-                    dataset_id=remote.dataset_id,
-                    name=getattr(remote, "name", None),
-                    expiration_time=exp,
-                    key=existing.key,
-                    kind=existing.kind,
-                    meta=existing.meta,
-                )
-                if cache_write:
-                    DATASETS.upsert(refreshed)
-                return existing.dataset_id
-        except Exception:
-            return None
-        return None
-
     # -----------------------------
     # Images
     # -----------------------------
@@ -137,7 +94,7 @@ def upload_datasets(
         batch_index = batch_start // images_per_batch
         key = f"{base_key}:kind=image_batch:batch={images_per_batch}:batch_index={batch_index}:offset={batch_start}:count={end - batch_start}"
         batch_specs.append((batch_start, end, key))
-        image_dataset_ids.append(_try_resolve_cached_id(key))
+        image_dataset_ids.append(try_resolve_cached_dataset_id(key=key, cache=cache, cache_write=cache_write))
         batch_start = end
 
     if all(x is not None for x in image_dataset_ids):
@@ -188,7 +145,7 @@ def upload_datasets(
     # Texts are ordered: all captions for image 0, then image 1, etc.
     text_ds_name = f"coco_karpathy_{split_name}_text_first{num_image_samples}_cap{captions_per_image}"
     text_key = f"coco-karpathy:{split_name}:firstN={num_image_samples}:kind=text:cap={captions_per_image}:tok={tok_sig}"
-    text_dataset_id = _try_resolve_cached_id(text_key)
+    text_dataset_id = try_resolve_cached_dataset_id(key=text_key, cache=cache, cache_write=cache_write)
     if text_dataset_id is None:
         num_text_samples = num_image_samples * captions_per_image
         print(f"Tokenizing {num_text_samples} captions...")

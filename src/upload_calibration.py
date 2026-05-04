@@ -1,25 +1,24 @@
 import argparse
 import io
 import urllib.request
-from datetime import datetime, timezone, timedelta
 
 import open_clip
-import qai_hub
 import torch.nn.functional as F
+import torchvision.transforms as T  # type: ignore
 from PIL import Image
 from datasets import load_dataset
 from tqdm import tqdm
 
-from dataset_store import get_or_upload_dataset
-from utils import MODELS, MODEL_PRETRAINED, NUM_CALIBRATION_SAMPLES, DATASETS
+from dataset_store import get_or_upload_dataset, try_resolve_cached_dataset_id
+from utils import MODELS, MODEL_PRETRAINED, NUM_CALIBRATION_SAMPLES
 
 
 def upload_calibration_datasets(
-    model_name: str,
-    *,
-    num_samples: int = NUM_CALIBRATION_SAMPLES,
-    cache: bool = True,
-    cache_write: bool = True,
+        model_name: str,
+        *,
+        num_samples: int = NUM_CALIBRATION_SAMPLES,
+        cache: bool = True,
+        cache_write: bool = True,
 ):
     """
     Upload small calibration datasets for post-training quantization.
@@ -32,28 +31,23 @@ def upload_calibration_datasets(
     model_pretrained = MODEL_PRETRAINED[model_name]
     print(f"Loading preprocess and tokenizer for {model_name}...")
     # Force preprocessing to output 224x224 to match our ONNX export + Hub compile input specs.
-    _, _, preprocess = open_clip.create_model_and_transforms(model_name, pretrained=model_pretrained, force_image_size=224)
+    _, _, preprocess = open_clip.create_model_and_transforms(model_name, pretrained=model_pretrained,
+                                                             force_image_size=224)
     tokenizer = open_clip.get_tokenizer(model_name)
 
     # Model-agnostic signatures for safe reuse across models when tensorization matches.
     mean = None
     std = None
     transforms = getattr(preprocess, "transforms", None) or []
-    try:
-        import torchvision.transforms as T  # type: ignore
-        for tr in transforms:
-            if isinstance(tr, T.Normalize):
-                mean = tuple(float(x) for x in tr.mean)
-                std = tuple(float(x) for x in tr.std)
-                break
-    except Exception:
-        pass
-    def _fmt_floats(xs):
-        if xs is None:
-            return "None"
-        return "[" + ",".join(f"{float(x):.8f}".rstrip("0").rstrip(".") for x in xs) + "]"
+    for tr in transforms:
+        if isinstance(tr, T.Normalize):
+            mean = tuple(float(x) for x in tr.mean)
+            std = tuple(float(x) for x in tr.std)
+            break
 
-    preproc_sig = f"img224:mean={_fmt_floats(mean)}:std={_fmt_floats(std)}"
+    fmt_mean = "None" if mean is None else "[" + ",".join(f"{float(x):.8f}".rstrip("0").rstrip(".") for x in mean) + "]"
+    fmt_std = "None" if std is None else "[" + ",".join(f"{float(x):.8f}".rstrip("0").rstrip(".") for x in std) + "]"
+    preproc_sig = f"img224:mean={fmt_mean}:std={fmt_std}"
 
     tok_shape = None
     tok_dtype = None
@@ -65,45 +59,13 @@ def upload_calibration_datasets(
         pass
     tok_sig = f"shape={tok_shape}:dtype={tok_dtype}"
 
-    def _try_resolve_cached_id(key: str) -> str | None:
-        if not cache:
-            return None
-        DATASETS.load()
-        existing = DATASETS.find_by_key(key)
-        if existing is None:
-            return None
-        now = datetime.now(timezone.utc)
-        if existing.expiration_time is not None and existing.expiration_time > (now + timedelta(minutes=5)):
-            return existing.dataset_id
-        try:
-            remote = qai_hub.get_dataset(existing.dataset_id)
-            if not remote.is_expired():
-                from dataset_registry import DatasetInfo
-                exp = getattr(remote, "expiration_time", None)
-                if exp is not None and getattr(exp, "tzinfo", None) is None:
-                    exp = exp.replace(tzinfo=timezone.utc)
-                refreshed = DatasetInfo(
-                    dataset_id=remote.dataset_id,
-                    name=getattr(remote, "name", None),
-                    expiration_time=exp,
-                    key=existing.key,
-                    kind=existing.kind,
-                    meta=existing.meta,
-                )
-                if cache_write:
-                    DATASETS.upsert(refreshed)
-                return existing.dataset_id
-        except Exception:
-            return None
-        return None
-
     print("Loading validation split...")
     ds = load_dataset("yerevann/coco-karpathy")
     samples = list(ds["validation"])[:num_samples]
 
     # ── Images ───────────────────────────────────────────────────────────────
     image_key = f"coco-karpathy:validation:firstN={num_samples}:kind=calib_image:preproc={preproc_sig}"
-    image_calib_id = _try_resolve_cached_id(image_key)
+    image_calib_id = try_resolve_cached_dataset_id(key=image_key, cache=cache, cache_write=cache_write)
     if image_calib_id is None:
         print(f"Downloading and preprocessing {len(samples)} calibration images...")
         calib_images = []
@@ -130,14 +92,13 @@ def upload_calibration_datasets(
             cache=cache,
             cache_write=cache_write,
         )
-    else:
-        pass
+
     print(f"Image calibration dataset ID: {image_calib_id}")
 
     # ── Texts ───────────────────────────────────────────────────────────────
     # One caption per image is sufficient for calibration.
     text_key = f"coco-karpathy:validation:firstN={num_samples}:kind=calib_text:tok={tok_sig}"
-    text_calib_id = _try_resolve_cached_id(text_key)
+    text_calib_id = try_resolve_cached_dataset_id(key=text_key, cache=cache, cache_write=cache_write)
     if text_calib_id is None:
         print(f"Tokenizing {len(samples)} calibration captions...")
         calib_texts = []
@@ -155,8 +116,6 @@ def upload_calibration_datasets(
             cache=cache,
             cache_write=cache_write,
         )
-    else:
-        pass
     print(f"Text calibration dataset ID: {text_calib_id}")
 
     return image_calib_id, text_calib_id

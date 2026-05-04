@@ -3,12 +3,6 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-
-
-def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
-
-
 def _parse_dt(value: str | None) -> datetime | None:
     if value is None:
         return None
@@ -43,7 +37,7 @@ class DatasetInfo:
     def is_expired(self, *, now: datetime | None = None) -> bool:
         if self.expiration_time is None:
             return False
-        n = now or _utc_now()
+        n = now or datetime.now(timezone.utc)
         return n >= self.expiration_time
 
     def to_json(self) -> dict[str, Any]:
@@ -116,7 +110,7 @@ class DatasetRegistry:
         if not isinstance(items, list):
             items = []
 
-        now = _utc_now()
+        now = datetime.now(timezone.utc)
         cleaned: dict[str, DatasetInfo] = {}
         changed = False
         for item in items:
@@ -150,7 +144,7 @@ class DatasetRegistry:
         self._save()
 
     def find_by_key(self, key: str) -> DatasetInfo | None:
-        now = _utc_now()
+        now = datetime.now(timezone.utc)
         candidates = [info for info in self._data.values() if info.key == key and not info.is_expired(now=now)]
         if not candidates:
             return None
