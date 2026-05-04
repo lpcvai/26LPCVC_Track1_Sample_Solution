@@ -7,13 +7,56 @@ import os
 import json
 from pathlib import Path
 
-MODELS = {
-    "MobileCLIP-S1": "datacompdr",
-    "MobileCLIP2-S0": "dfndr2b",
-    "MobileCLIP2-S2": "dfndr2b",
-    "MobileCLIP2-B": "dfndr2b",
-    "MobileCLIP2-S3": "dfndr2b",
-}
+from dataset_registry import DatasetRegistry
+
+def _load_models_json(path: str = "models.json") -> tuple[list[str], dict[str, str], dict[str, dict]]:
+    p = Path(path)
+    if not p.exists():
+        return [], {}, {}
+    try:
+        obj = json.loads(p.read_text()) or {}
+    except Exception:
+        return [], {}, {}
+    models = obj.get("models")
+    if not isinstance(models, list):
+        return [], {}, {}
+    names: list[str] = []
+    pretrained: dict[str, str] = {}
+    meta: dict[str, dict] = {}
+    for m in models:
+        if not isinstance(m, dict):
+            continue
+        name = m.get("name")
+        mid = m.get("id")
+        if isinstance(name, str) and name.strip() and isinstance(mid, str) and mid.strip():
+            names.append(name.strip())
+            pretrained[name.strip()] = mid.strip()
+            meta[name.strip()] = m
+    return names, pretrained, meta
+
+
+# List of supported model names (kept as a list for CLI choices / iteration).
+# Mapping from model name -> open_clip pretrained tag.
+# These are primarily sourced from repo-root models.json.
+MODELS, MODEL_PRETRAINED, MODEL_META = _load_models_json()
+
+# Backwards-compatible fallback if models.json is missing/corrupt.
+if not MODELS or not MODEL_PRETRAINED:
+    MODELS = [
+        "MobileCLIP-S1",
+        "MobileCLIP2-S0",
+        "MobileCLIP2-S2",
+        "MobileCLIP2-B",
+        "MobileCLIP2-S3",
+    ]
+    MODEL_PRETRAINED = {
+        "MobileCLIP-S1": "datacompdr",
+        "MobileCLIP2-S0": "dfndr2b",
+        "MobileCLIP2-S2": "dfndr2b",
+        "MobileCLIP2-B": "dfndr2b",
+        "MobileCLIP2-S3": "dfndr2b",
+    }
+    MODEL_META = {}
 
 NUM_IMAGE_SAMPLES = 1000
 # When NUM_IMAGE_SAMPLES is large, uploading/running inference on a single image dataset can exceed
@@ -133,3 +176,7 @@ class JobIds:
 
 
 JOB_IDS = JobIds("job_ids.json")
+
+# Local cache of uploaded dataset metadata (ids, names, expiration, image range).
+# The registry prunes expired/invalid entries on load.
+DATASETS = DatasetRegistry("datasets.json")

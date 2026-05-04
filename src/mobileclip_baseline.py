@@ -13,16 +13,16 @@ from datasets import load_dataset
 from timm.utils import reparameterize_model
 from tqdm import tqdm
 
-from utils import RESULTS_PATH, MODELS, BATCH_SIZE, NUM_DOWNLOAD_WORKERS
+from utils import RESULTS_PATH, MODELS, MODEL_PRETRAINED, BATCH_SIZE, NUM_DOWNLOAD_WORKERS
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--test-only", action="store_true", help="Run on the test split only")
 parser.add_argument("--gpu", action="store_true", help="Run model inference on GPU")
-parser.add_argument("--model", choices=MODELS.keys(), default="MobileCLIP2-S3", help="Model to use")
+parser.add_argument("--model", choices=MODELS, default="MobileCLIP2-S3", help="Model to use")
 args = parser.parse_args()
 
 MODEL_NAME = args.model
-MODEL_PRETRAINED = MODELS[args.model]
+MODEL_PRETRAINED_TAG = MODEL_PRETRAINED[args.model]
 
 
 def download_image(url):
@@ -31,7 +31,7 @@ def download_image(url):
 
 
 print("Loading model...")
-model, _, preprocess = open_clip.create_model_and_transforms(MODEL_NAME, pretrained=MODEL_PRETRAINED)
+model, _, preprocess = open_clip.create_model_and_transforms(MODEL_NAME, pretrained=MODEL_PRETRAINED_TAG)
 tokenizer = open_clip.get_tokenizer(MODEL_NAME)
 model.eval()
 model = reparameterize_model(model)

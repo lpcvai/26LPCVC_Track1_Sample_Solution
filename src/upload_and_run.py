@@ -16,10 +16,14 @@ def build_arg_parser():
         parents=[cap_parser],
         conflict_handler="resolve",
     )
-    parser.add_argument("--upload-model", choices=MODELS.keys(), default="MobileCLIP2-S0",
+    parser.add_argument("--upload-model", choices=MODELS, default="MobileCLIP2-S0",
                         help="Model name used to build preprocess/tokenizer for dataset upload.")
     parser.add_argument("--no-upload", action="store_true",
                         help="Do not upload datasets; error if dataset IDs are missing.")
+    parser.add_argument("--cache", default=True, action=argparse.BooleanOptionalAction,
+                        help="Reuse datasets via datasets.json when uploading (default: enabled).")
+    parser.add_argument("--cache-write", default=True, action=argparse.BooleanOptionalAction,
+                        help="Write uploaded dataset info into datasets.json (default: enabled).")
     parser.add_argument("--image-dataset-ids", default=None,
                         help="Comma-separated list of image dataset ids (batched). Overrides --image-dataset-id/job_ids.json.")
     parser.add_argument("--images-per-batch", type=int, default=None,
@@ -55,6 +59,8 @@ def _resolve_dataset_ids(args):
             images_per_batch=int(args.images_per_batch or IMAGES_PER_BATCH),
             num_image_samples=int(args.num_images or NUM_IMAGE_SAMPLES),
             captions_per_image=CAPTIONS_PER_IMAGE,
+            cache=bool(getattr(args, "cache", True)),
+            cache_write=bool(getattr(args, "cache_write", True)),
         )
         args.image_dataset_ids = ",".join(image_dataset_ids)
         args.text_dataset_id = text_dataset_id

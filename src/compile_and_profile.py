@@ -32,7 +32,7 @@ class FAISSIndexWrapper(torch.nn.Module):
 def build_arg_parser():
     parser = argparse.ArgumentParser()
     group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument("--model", choices=MODELS.keys(), help="Single model to compile and profile")
+    group.add_argument("--model", choices=MODELS, help="Single model to compile and profile")
     group.add_argument("--all", action="store_true", help="Compile and profile all models")
     parser.add_argument("--text-dataset-id", default=JOB_IDS["text", "dataset_id"],
                         help="QAI Hub dataset ID for texts  (from upload_dataset.py). "
@@ -314,7 +314,7 @@ def run_pipeline(args, *, persist_job_ids: bool = True):
     image_calib_dataset = qai_hub.get_dataset(args.image_calibration_id) if args.quantize else None
     text_calib_dataset = qai_hub.get_dataset(args.text_calibration_id) if args.quantize else None
 
-    targets = MODELS if args.all else {args.model: MODELS[args.model]}
+    targets = list(MODELS) if args.all else [args.model]
 
     target_device = qai_hub.Device(args.device)
     compiled_models = {}  # model_name -> list of compiled models to profile

@@ -30,6 +30,7 @@ share/python-wheels/
 MANIFEST
 exported_onnx/
 job_ids.json
+datasets.json
 results
 
 # PyInstaller
@@ -136,3 +137,4 @@ dmypy.json
 # macOS
 **/.DS_Store
 
+/datasets.json

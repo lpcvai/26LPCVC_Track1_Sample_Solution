@@ -14,6 +14,7 @@ import qai_hub.public_rest_api as hub_api
 
 from utils import (
     MODELS,
+    MODEL_PRETRAINED,
     RESULTS_PATH,
     CAPTIONS_PER_IMAGE,
     IMAGES_PER_BATCH,
@@ -26,7 +27,7 @@ from utils import (
 
 def build_arg_parser():
     parser = argparse.ArgumentParser(description="Run compile+inference benchmarks across models/topk modes.")
-    parser.add_argument("--models", nargs="*", default=None, choices=list(MODELS.keys()),
+    parser.add_argument("--models", nargs="*", default=None, choices=list(MODELS),
                         help="Models to benchmark. If omitted, benchmarks all models.")
     parser.add_argument("--topk", choices=["cosine", "faiss", "both"], default="both",
                         help="Which topk mode(s) to benchmark.")
@@ -69,6 +70,10 @@ def build_arg_parser():
     parser.add_argument("--job-name-prefix", default="",
                         help="Optional prefix for QAI Hub inference job names to make jobs easier to identify in the UI.")
     parser.add_argument("--output", default=None, help="Optional path to write a JSON summary.")
+    parser.add_argument("--cache", default=True, action=argparse.BooleanOptionalAction,
+                        help="Reuse datasets via datasets.json (default: enabled).")
+    parser.add_argument("--cache-write", default=True, action=argparse.BooleanOptionalAction,
+                        help="Write uploaded dataset info into datasets.json (default: enabled).")
     return parser
 
 
@@ -81,7 +86,7 @@ def _dataset_profile(model_name: str) -> str:
     import open_clip  # type: ignore
     import torchvision.transforms as T  # type: ignore
 
-    pretrained = MODELS[model_name]
+    pretrained = MODEL_PRETRAINED[model_name]
     # Force preprocessing to output 224x224 to match our ONNX export + Hub compile input specs.
     _, _, preprocess = open_clip.create_model_and_transforms(model_name, pretrained=pretrained, force_image_size=224)
     tokenizer = open_clip.get_tokenizer(model_name)
@@ -110,6 +115,8 @@ def _upload_datasets_for_models(
     image_calibration_id: str | None,
     text_calibration_id: str | None,
     calibration_samples: int,
+    cache: bool = True,
+    cache_write: bool = True,
 ):
     """
     Upload datasets per distinct (preprocess, tokenizer) profile, then map each model -> datasets.
@@ -132,6 +139,8 @@ def _upload_datasets_for_models(
                 persist_job_ids=False,
                 num_image_samples=num_images,
                 captions_per_image=CAPTIONS_PER_IMAGE,
+                cache=bool(cache),
+                cache_write=bool(cache_write),
             )
             calib = None
             if quantize:
@@ -143,6 +152,8 @@ def _upload_datasets_for_models(
                     img_cal_id, txt_cal_id = upload_calibration_datasets(
                         model_name,
                         num_samples=calibration_samples,
+                        cache=bool(cache),
+                        cache_write=bool(cache_write),
                     )
                     calib = {"image_calibration_id": img_cal_id, "text_calibration_id": txt_cal_id}
             profile_to_datasets[profile] = {
@@ -192,7 +203,7 @@ def main(argv=None):
     parser = build_arg_parser()
     args = parser.parse_args(argv)
 
-    models = args.models if args.models else list(MODELS.keys())
+    models = args.models if args.models else list(MODELS)
     num_images = int(args.num_images or NUM_IMAGE_SAMPLES)
     num_text = num_images * CAPTIONS_PER_IMAGE
     images_per_batch = int(args.images_per_batch or IMAGES_PER_BATCH)
@@ -209,12 +220,17 @@ def main(argv=None):
         image_calibration_id=getattr(args, "image_calibration_id", None),
         text_calibration_id=getattr(args, "text_calibration_id", None),
         calibration_samples=calibration_samples,
+        cache=bool(getattr(args, "cache", True)),
+        cache_write=bool(getattr(args, "cache_write", True)),
     )
 
     # Avoid clobbering ONNX artifacts when multiple experiments are run concurrently by
-    # exporting/compiling into a run-specific directory.
-    run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-    onnx_root = os.path.join(RESULTS_PATH, "onnx_experiments", run_id)
+    # exporting/compiling into a parameterized directory. This makes repeated runs reuse
+    # the same ONNX artifacts instead of generating a new folder each time.
+    #
+    # NOTE: Top-k ONNX export shape depends on num_images + topk_images_per_batch.
+    onnx_key = f"img224_numimg{num_images}_topkbatch{topk_images_per_batch}_cap{CAPTIONS_PER_IMAGE}"
+    onnx_root = os.path.join(RESULTS_PATH, "onnx_experiments", onnx_key)
 
     if args.export_onnx:
         # Ensure ONNX artifacts match current NUM_IMAGE_SAMPLES / expected topk batch size.
@@ -224,6 +240,14 @@ def main(argv=None):
             print(f"\n{'=' * 70}")
             print(f"Export ONNX: {model_name}")
             print(f"{'=' * 70}")
+            # Skip export if the expected artifacts already exist for this model.
+            onnx_dir = os.path.join(onnx_root, model_name)
+            image_onnx = os.path.join(onnx_dir, "image_encoder.onnx")
+            text_onnx = os.path.join(onnx_dir, "text_encoder.onnx")
+            topk_onnx = os.path.join(onnx_dir, "topk_retrieval.onnx")
+            if os.path.exists(image_onnx) and os.path.exists(text_onnx) and os.path.exists(topk_onnx):
+                print("ONNX already exists; skipping export.")
+                continue
             subprocess.run(
                 [
                     sys.executable,

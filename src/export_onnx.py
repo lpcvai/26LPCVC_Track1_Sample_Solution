@@ -5,11 +5,11 @@ import open_clip
 import torch
 from timm.utils import reparameterize_model
 
-from utils import MODELS, RESULTS_PATH, NUM_IMAGE_SAMPLES, CAPTIONS_PER_IMAGE, K, TOPK_IMAGES_PER_BATCH
+from utils import MODELS, MODEL_PRETRAINED, RESULTS_PATH, NUM_IMAGE_SAMPLES, CAPTIONS_PER_IMAGE, K, TOPK_IMAGES_PER_BATCH
 
 parser = argparse.ArgumentParser()
 group = parser.add_mutually_exclusive_group(required=True)
-group.add_argument("--model", choices=MODELS.keys(), help="Single model to export")
+group.add_argument("--model", choices=MODELS, help="Single model to export")
 group.add_argument("--all", action="store_true", help="Export all models")
 parser.add_argument("--image-size", type=int, default=224,
                     help="Force image input resolution H=W for all exported image encoders (default: 224).")
@@ -142,6 +142,6 @@ def export_model(model_name: str, pretrained: str):
     print(f"Export complete for {model_name}.")
 
 if __name__ == "__main__":
-    targets = MODELS if args.all else {args.model: MODELS[args.model]}
-    for model_name, pretrained in targets.items():
-        export_model(model_name, pretrained)
+    targets = list(MODELS) if args.all else [args.model]
+    for model_name in targets:
+        export_model(model_name, MODEL_PRETRAINED[model_name])
