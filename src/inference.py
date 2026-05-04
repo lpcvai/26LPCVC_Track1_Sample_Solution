@@ -6,7 +6,6 @@ import qai_hub
 
 from utils import CAPTIONS_PER_IMAGE, JOB_IDS, TOPK_IMAGES_PER_BATCH
 from utils import MAX_INFERENCE_INFLIGHT
-from utils import IMAGES_PER_BATCH
 
 
 def first_output(job):
@@ -54,8 +53,6 @@ def build_arg_parser():
     parser.add_argument("--device", default="XR2 Gen 2 (Proxy)", help="QAI Hub target device")
     parser.add_argument("--job-name-prefix", default="",
                         help="Optional prefix for QAI Hub job names to make jobs easier to identify in the UI.")
-    parser.add_argument("--max-inflight", type=int, default=None,
-                        help=f"Max number of inference jobs to keep in-flight when batching (default: {MAX_INFERENCE_INFLIGHT}).")
     parser.add_argument("--topk-images-per-batch", type=int, default=None,
                         help=f"Images per top-k inference job (default from utils.py: {TOPK_IMAGES_PER_BATCH}).")
     return parser
@@ -288,7 +285,7 @@ def main(argv=None):
         text_compiled_id=args.text_compiled_id,
         text_dataset_id=args.text_dataset_id,
         job_name_prefix=args.job_name_prefix,
-        max_inference_inflight=int(args.max_inflight or MAX_INFERENCE_INFLIGHT),
+        max_inference_inflight=int(MAX_INFERENCE_INFLIGHT),
         topk_images_per_batch=args.topk_images_per_batch,
     )
     print(f"Recall@10: {recall_at_10:.4f}  ({recall_at_10 * 100:.2f}%)")

@@ -2,7 +2,6 @@ import argparse
 import io
 import urllib.request
 from datetime import datetime, timezone, timedelta
-import os
 
 import open_clip
 import qai_hub
@@ -11,8 +10,8 @@ from PIL import Image
 from datasets import load_dataset
 from tqdm import tqdm
 
-from utils import MODELS, MODEL_PRETRAINED, NUM_CALIBRATION_SAMPLES, DATASETS
 from dataset_store import get_or_upload_dataset
+from utils import MODELS, MODEL_PRETRAINED, NUM_CALIBRATION_SAMPLES, DATASETS
 
 
 def upload_calibration_datasets(
@@ -66,26 +65,15 @@ def upload_calibration_datasets(
         pass
     tok_sig = f"shape={tok_shape}:dtype={tok_dtype}"
 
-    debug = os.getenv("QAI_DATASET_CACHE_DEBUG", "").strip().lower() in ("1", "true", "yes", "y", "on")
-
     def _try_resolve_cached_id(key: str) -> str | None:
         if not cache:
-            if debug:
-                print(f"[dataset-cache] request key={key!r} cache=False -> bypass")
             return None
         DATASETS.load()
         existing = DATASETS.find_by_key(key)
-        if debug:
-            if existing is None:
-                print(f"[dataset-cache] request key={key!r} lookup: MISS")
-            else:
-                print(f"[dataset-cache] request key={key!r} lookup: HIT id={existing.dataset_id} expires={existing.expiration_time}")
         if existing is None:
             return None
         now = datetime.now(timezone.utc)
         if existing.expiration_time is not None and existing.expiration_time > (now + timedelta(minutes=5)):
-            if debug:
-                print("[dataset-cache] reuse: local expiration OK; returning cached dataset id")
             return existing.dataset_id
         try:
             remote = qai_hub.get_dataset(existing.dataset_id)
@@ -104,12 +92,8 @@ def upload_calibration_datasets(
                 )
                 if cache_write:
                     DATASETS.upsert(refreshed)
-                if debug:
-                    print("[dataset-cache] reuse: revalidated against Hub; returning cached dataset id")
                 return existing.dataset_id
         except Exception:
-            if debug:
-                print("[dataset-cache] reuse: Hub get_dataset failed; will treat as MISS")
             return None
         return None
 
@@ -146,8 +130,8 @@ def upload_calibration_datasets(
             cache=cache,
             cache_write=cache_write,
         )
-    elif debug:
-        print("[dataset-cache] calib images: cached; skipping download/preprocess/upload")
+    else:
+        pass
     print(f"Image calibration dataset ID: {image_calib_id}")
 
     # ── Texts ───────────────────────────────────────────────────────────────
@@ -171,8 +155,8 @@ def upload_calibration_datasets(
             cache=cache,
             cache_write=cache_write,
         )
-    elif debug:
-        print("[dataset-cache] calib texts: cached; skipping tokenization/upload")
+    else:
+        pass
     print(f"Text calibration dataset ID: {text_calib_id}")
 
     return image_calib_id, text_calib_id

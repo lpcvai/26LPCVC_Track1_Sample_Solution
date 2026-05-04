@@ -1,8 +1,6 @@
 import argparse
 import json
 import os
-import subprocess
-import sys
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -11,6 +9,7 @@ import numpy as np
 import qai_hub
 import time
 import qai_hub.public_rest_api as hub_api
+from export_onnx import export_models
 
 from utils import (
     MODELS,
@@ -21,7 +20,6 @@ from utils import (
     MAX_INFERENCE_INFLIGHT,
     NUM_IMAGE_SAMPLES,
     NUM_CALIBRATION_SAMPLES,
-    TOPK_IMAGES_PER_BATCH,
 )
 
 
@@ -38,16 +36,16 @@ def build_arg_parser():
                         help="Compute unit for FAISS compile and inference jobs (only applies with --topk faiss)")
     # Optional arg:
     #   no flag => no quantization
-    #   --quantize           => quantize both encoders
-    #   --quantize both      => quantize both encoders
-    #   --quantize image     => quantize only image encoder
-    #   --quantize text      => quantize only text encoder
-    parser.add_argument("--quantize", nargs="?", const="both", default=None,
-                        choices=["both", "image", "text"],
-                        help="Apply post-training quantization during compilation. "
-                             "Usage: --quantize (same as --quantize both), --quantize image, --quantize text.")
-    parser.add_argument("--quantize-type", default="int8", choices=["w4a8", "w8a16", "w4a16", "int8", "int16"],
-                        help="Quantization type (only applies with --quantize)")
+    #   --quantize <type> => quantize both encoders using the given quantization type
+    parser.add_argument(
+        "--quantize",
+        nargs="?",
+        const="int16",
+        default=None,
+        choices=["w4a8", "w8a16", "w4a16", "int8", "int16"],
+        help="Apply post-training quantization to both encoders during compilation. "
+             "If provided without a value, defaults to int16.",
+    )
     parser.add_argument("--image-calibration-id", default=None,
                         help="QAI Hub dataset ID for image calibration data (required for --quantize)")
     parser.add_argument("--text-calibration-id", default=None,
@@ -57,16 +55,8 @@ def build_arg_parser():
                              f"(default from utils.py: {NUM_CALIBRATION_SAMPLES}).")
     parser.add_argument("--images-per-batch", type=int, default=None,
                         help=f"Images per uploaded dataset and per image-encoder inference job (default: {IMAGES_PER_BATCH}).")
-    parser.add_argument("--max-inflight", type=int, default=None,
-                        help=f"Max number of inference jobs to keep in-flight when batching (default: {MAX_INFERENCE_INFLIGHT}).")
     parser.add_argument("--topk-images-per-batch", type=int, default=None,
-                        help=f"Images per top-k inference job (default from utils.py: {TOPK_IMAGES_PER_BATCH}).")
-    parser.add_argument("--export-onnx", action="store_true", default=True,
-                        help="Export ONNX artifacts for each model before compiling (default: enabled).")
-    parser.add_argument("--no-export-onnx", action="store_false", dest="export_onnx",
-                        help="Skip ONNX export step (assume results/onnx/<model>/ already exists).")
-    parser.add_argument("--max-workers", type=int, default=2,
-                        help="Max number of models to evaluate concurrently (each model evaluation submits multiple jobs).")
+                        help="Images per top-k inference job (default: same as --images-per-batch).")
     parser.add_argument("--job-name-prefix", default="",
                         help="Optional prefix for QAI Hub inference job names to make jobs easier to identify in the UI.")
     parser.add_argument("--output", default=None, help="Optional path to write a JSON summary.")
@@ -107,16 +97,16 @@ def _dataset_profile(model_name: str) -> str:
 
 
 def _upload_datasets_for_models(
-    models: list[str],
-    *,
-    images_per_batch: int,
-    num_images: int,
-    quantize: bool,
-    image_calibration_id: str | None,
-    text_calibration_id: str | None,
-    calibration_samples: int,
-    cache: bool = True,
-    cache_write: bool = True,
+        models: list[str],
+        *,
+        images_per_batch: int,
+        num_images: int,
+        quantize: bool,
+        image_calibration_id: str | None,
+        text_calibration_id: str | None,
+        calibration_samples: int,
+        cache: bool = True,
+        cache_write: bool = True,
 ):
     """
     Upload datasets per distinct (preprocess, tokenizer) profile, then map each model -> datasets.
@@ -173,11 +163,6 @@ def _upload_datasets_for_models(
     return model_to_datasets, profile_to_datasets
 
 
-def _iter_topk_modes(topk_arg: str):
-    if topk_arg == "both":
-        return ["cosine", "faiss"]
-    return [topk_arg]
-
 def _snapshot_for_run(*, cj: dict, image_dataset_ids: list[str], text_dataset_id: str, topk_compiled_id: str | None):
     """
     Build a stable per-run snapshot of the exact compile job IDs used.
@@ -203,14 +188,13 @@ def main(argv=None):
     parser = build_arg_parser()
     args = parser.parse_args(argv)
 
-    models = args.models if args.models else list(MODELS)
+    models = args.models if args.models else MODELS
     num_images = int(args.num_images or NUM_IMAGE_SAMPLES)
     num_text = num_images * CAPTIONS_PER_IMAGE
     images_per_batch = int(args.images_per_batch or IMAGES_PER_BATCH)
-    max_inflight = int(args.max_inflight or MAX_INFERENCE_INFLIGHT)
-    topk_modes = _iter_topk_modes(args.topk)
+    topk_modes = ["cosine", "faiss"] if args.topk == "both" else [args.topk]
     calibration_samples = int(args.calibration_samples or NUM_CALIBRATION_SAMPLES)
-    topk_images_per_batch = int(args.topk_images_per_batch or TOPK_IMAGES_PER_BATCH)
+    topk_images_per_batch = int(args.topk_images_per_batch or images_per_batch)
 
     model_to_datasets, profile_to_datasets = _upload_datasets_for_models(
         models,
@@ -232,39 +216,31 @@ def main(argv=None):
     onnx_key = f"img224_numimg{num_images}_topkbatch{topk_images_per_batch}_cap{CAPTIONS_PER_IMAGE}"
     onnx_root = os.path.join(RESULTS_PATH, "onnx_experiments", onnx_key)
 
-    if args.export_onnx:
-        # Ensure ONNX artifacts match current NUM_IMAGE_SAMPLES / expected topk batch size.
-        # We force image_size=224 (repo convention) and top-k batch to NUM_IMAGE_SAMPLES
-        # so one-shot topk works without shape mismatches.
-        for model_name in models:
-            print(f"\n{'=' * 70}")
-            print(f"Export ONNX: {model_name}")
-            print(f"{'=' * 70}")
-            # Skip export if the expected artifacts already exist for this model.
-            onnx_dir = os.path.join(onnx_root, model_name)
-            image_onnx = os.path.join(onnx_dir, "image_encoder.onnx")
-            text_onnx = os.path.join(onnx_dir, "text_encoder.onnx")
-            topk_onnx = os.path.join(onnx_dir, "topk_retrieval.onnx")
-            if os.path.exists(image_onnx) and os.path.exists(text_onnx) and os.path.exists(topk_onnx):
-                print("ONNX already exists; skipping export.")
-                continue
-            subprocess.run(
-                [
-                    sys.executable,
-                    "src/export_onnx.py",
-                    "--model",
-                    model_name,
-                    "--image-size",
-                    "224",
-                    "--num-images",
-                    str(num_images),
-                    "--images-per-batch",
-                    str(topk_images_per_batch),
-                    "--onnx-root",
-                    onnx_root,
-                ],
-                check=True,
-            )
+    # Ensure ONNX artifacts match current num_images / expected topk batch size.
+    # We force image_size=224 (repo convention). Export is skipped if artifacts already exist.
+    missing_onnx_models: list[str] = []
+    for model_name in models:
+        onnx_dir = os.path.join(onnx_root, model_name)
+        image_onnx = os.path.join(onnx_dir, "image_encoder.onnx")
+        text_onnx = os.path.join(onnx_dir, "text_encoder.onnx")
+        topk_onnx = os.path.join(onnx_dir, "topk_retrieval.onnx")
+        if os.path.exists(image_onnx) and os.path.exists(text_onnx) and os.path.exists(topk_onnx):
+            continue
+        missing_onnx_models.append(model_name)
+
+    if not missing_onnx_models:
+        print("ONNX already exists for all requested models; skipping export.")
+    else:
+        print(f"\n{'=' * 70}")
+        print(f"Export ONNX: {', '.join(missing_onnx_models)}")
+        print(f"{'=' * 70}")
+        export_models(
+            models=missing_onnx_models,
+            image_size=224,
+            num_images=int(num_images),
+            images_per_batch=int(topk_images_per_batch),
+            onnx_root=str(onnx_root),
+        )
     results = {
         "timestamp": datetime.now().isoformat(timespec="seconds"),
         "device": args.device,
@@ -299,10 +275,10 @@ def main(argv=None):
             faiss_compute_unit=args.faiss_compute_unit,
             profile=False,
             quantize=args.quantize,
-            quantize_type=args.quantize_type,
-            quantize_target=(args.quantize or "both"),
-            image_calibration_id=((model_to_datasets.get(model_name) or {}).get("calibration") or {}).get("image_calibration_id"),
-            text_calibration_id=((model_to_datasets.get(model_name) or {}).get("calibration") or {}).get("text_calibration_id"),
+            image_calibration_id=((model_to_datasets.get(model_name) or {}).get("calibration") or {}).get(
+                "image_calibration_id"),
+            text_calibration_id=((model_to_datasets.get(model_name) or {}).get("calibration") or {}).get(
+                "text_calibration_id"),
             onnx_root=onnx_root,
         )
 
@@ -315,8 +291,7 @@ def main(argv=None):
                 results["runs"].append({
                     "model": model_name,
                     "topk": topk_mode,
-                    "quantize": bool(args.quantize),
-                    "quantize_type": args.quantize_type,
+                    "quantize": args.quantize,
                     "faiss_compute_unit": args.faiss_compute_unit,
                     "recall_at_10": None,
                     "datasets": model_to_datasets.get(model_name),
@@ -331,8 +306,7 @@ def main(argv=None):
                 results["runs"].append({
                     "model": model_name,
                     "topk": topk_mode,
-                    "quantize": bool(args.quantize),
-                    "quantize_type": args.quantize_type,
+                    "quantize": args.quantize,
                     "faiss_compute_unit": args.faiss_compute_unit,
                     "recall_at_10": None,
                     "datasets": model_to_datasets.get(model_name),
@@ -371,7 +345,8 @@ def main(argv=None):
         text_dataset = qai_hub.get_dataset(text_dataset_id) if (need_cosine or need_faiss) else None
 
         image_compiled = qai_hub.get_job(cj["image_compiled_id"]).get_target_model()
-        text_compiled = qai_hub.get_job(cj["text_compiled_id"]).get_target_model() if (need_cosine or need_faiss) else None
+        text_compiled = qai_hub.get_job(cj["text_compiled_id"]).get_target_model() if (
+                need_cosine or need_faiss) else None
 
         def _inference_detail(job: qai_hub.InferenceJob):
             """
@@ -441,7 +416,7 @@ def main(argv=None):
                 "submitted_at_epoch_s": t0,
             })
 
-        max_jobs = max(1, int(max_inflight))
+        max_jobs = max(1, int(MAX_INFERENCE_INFLIGHT))
         while pending or active:
             while pending and len(active) < max_jobs:
                 idx, ds_id = pending.pop(0)
@@ -512,10 +487,11 @@ def main(argv=None):
                 raise ValueError(f"Invalid topk batch size: {topk_batch}")
 
             num_topk_batches = (num_images + topk_batch - 1) // topk_batch
-            print(f"Submitting cosine top-k inference for {model_name} (batch_size={topk_batch}, batches={num_topk_batches})...")
+            print(
+                f"Submitting cosine top-k inference for {model_name} (batch_size={topk_batch}, batches={num_topk_batches})...")
 
             # Submit up to max_inflight top-k jobs in parallel.
-            topk_max_inflight = max(1, int(args.max_inflight or MAX_INFERENCE_INFLIGHT))
+            topk_max_inflight = max(1, int(MAX_INFERENCE_INFLIGHT))
             topk_jobs: list[dict] = []
             results_by_batch: dict[int, np.ndarray] = {}
 
@@ -568,7 +544,8 @@ def main(argv=None):
                     out = first_output_inference(job)[0]
                     results_by_batch[bi] = out[:valid]
                     for rec in topk_jobs:
-                        if rec.get("batch_index") == bi and rec.get("job_id") == job.job_id and "wall_time_s" not in rec:
+                        if rec.get("batch_index") == bi and rec.get(
+                                "job_id") == job.job_id and "wall_time_s" not in rec:
                             rec["wall_time_s"] = t_done - rec["submitted_at_epoch_s"]
                             rec["hub_detail"] = _inference_detail(job)
                             break
@@ -584,12 +561,12 @@ def main(argv=None):
             results["runs"].append({
                 "model": model_name,
                 "topk": "cosine",
-                "quantize": bool(args.quantize),
-                "quantize_type": args.quantize_type,
+                "quantize": args.quantize,
                 "faiss_compute_unit": args.faiss_compute_unit,
                 "recall_at_10": recall_at_10,
                 "jobs": {
-                    "text": {"job_id": text_job_id, "url": text_job_url, "name": text_name, "wall_time_s": text_wall_s, "hub_detail": text_detail},
+                    "text": {"job_id": text_job_id, "url": text_job_url, "name": text_name, "wall_time_s": text_wall_s,
+                             "hub_detail": text_detail},
                     "images": sorted(image_jobs, key=lambda r: r.get("batch_index", 0)),
                     "topk": {"batch_size": topk_batch, "jobs": topk_jobs},
                 },
@@ -628,9 +605,10 @@ def main(argv=None):
                 raise ValueError(f"Invalid topk batch size: {topk_batch}")
 
             num_topk_batches = (num_images + topk_batch - 1) // topk_batch
-            print(f"Submitting FAISS top-k inference for {model_name} (batch_size={topk_batch}, batches={num_topk_batches})...")
+            print(
+                f"Submitting FAISS top-k inference for {model_name} (batch_size={topk_batch}, batches={num_topk_batches})...")
 
-            topk_max_inflight = max(1, int(args.max_inflight or MAX_INFERENCE_INFLIGHT))
+            topk_max_inflight = max(1, int(MAX_INFERENCE_INFLIGHT))
             topk_jobs: list[dict] = []
             results_by_batch: dict[int, np.ndarray] = {}
 
@@ -684,7 +662,8 @@ def main(argv=None):
                     out = first_output_inference(job)[0]
                     results_by_batch[bi] = out[:valid]
                     for rec in topk_jobs:
-                        if rec.get("batch_index") == bi and rec.get("job_id") == job.job_id and "wall_time_s" not in rec:
+                        if rec.get("batch_index") == bi and rec.get(
+                                "job_id") == job.job_id and "wall_time_s" not in rec:
                             rec["wall_time_s"] = t_done - rec["submitted_at_epoch_s"]
                             rec["hub_detail"] = _inference_detail(job)
                             break
@@ -700,12 +679,12 @@ def main(argv=None):
             results["runs"].append({
                 "model": model_name,
                 "topk": "faiss",
-                "quantize": bool(args.quantize),
-                "quantize_type": args.quantize_type,
+                "quantize": args.quantize,
                 "faiss_compute_unit": args.faiss_compute_unit,
                 "recall_at_10": recall_at_10,
                 "jobs": {
-                    "text": {"job_id": text_job_id, "url": text_job_url, "name": text_name, "wall_time_s": text_wall_s, "hub_detail": text_detail},
+                    "text": {"job_id": text_job_id, "url": text_job_url, "name": text_name, "wall_time_s": text_wall_s,
+                             "hub_detail": text_detail},
                     "images": sorted(image_jobs, key=lambda r: r.get("batch_index", 0)),
                     "topk": {"batch_size": topk_batch, "jobs": topk_jobs},
                 },
@@ -719,7 +698,7 @@ def main(argv=None):
 
     # Evaluate models with limited concurrency to avoid creating a large number of Hub jobs.
     planned_models = [m for m in models if m in compile_by_model]
-    max_workers = min(max(1, int(args.max_workers)), max(1, len(planned_models)))
+    max_workers = min(2, max(1, len(planned_models)))
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         future_to_model = {ex.submit(_eval_model, m): m for m in planned_models}
         for fut in as_completed(future_to_model):
@@ -735,8 +714,7 @@ def main(argv=None):
                     results["runs"].append({
                         "model": model_name,
                         "topk": topk_mode,
-                        "quantize": bool(args.quantize),
-                        "quantize_type": args.quantize_type,
+                        "quantize": args.quantize,
                         "faiss_compute_unit": args.faiss_compute_unit,
                         "recall_at_10": None,
                         "job_ids_snapshot": _snapshot_for_run(

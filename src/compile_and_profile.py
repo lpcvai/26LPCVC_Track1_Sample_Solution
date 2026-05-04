@@ -3,10 +3,11 @@ import os
 
 import numpy as np
 import onnx
-import torch
 import qai_hub
+import torch
 
-from utils import RESULTS_PATH, MODELS, NUM_IMAGE_SAMPLES, CAPTIONS_PER_IMAGE, K, JOB_IDS, IMAGES_PER_BATCH
+from utils import RESULTS_PATH, MODELS, K, JOB_IDS, IMAGES_PER_BATCH
+
 # NOTE: This module is responsible for submitting compile/profile jobs.
 # Inference/evaluation lives in src/inference.py and src/upload_and_run.py.
 
@@ -47,16 +48,16 @@ def build_arg_parser():
     parser.add_argument("--profile", action="store_true", help="Submit profile jobs after recall is computed")
     # Optional arg:
     #   no flag => no quantization
-    #   --quantize           => quantize both encoders
-    #   --quantize both      => quantize both encoders
-    #   --quantize image     => quantize only image encoder
-    #   --quantize text      => quantize only text encoder
-    parser.add_argument("--quantize", nargs="?", const="both", default=None,
-                        choices=["both", "image", "text"],
-                        help="Apply post-training quantization during compilation. "
-                             "Usage: --quantize (same as --quantize both), --quantize image, --quantize text.")
-    parser.add_argument("--quantize-type", default="int8", choices=["w4a8", "w8a16", "w4a16", "int8", "int16"],
-                        help="Quantization type (only applies with --quantize; uses Quantize Job API)")
+    #   --quantize <type> => quantize both encoders using the given quantization type
+    parser.add_argument(
+        "--quantize",
+        nargs="?",
+        const="int16",
+        default=None,
+        choices=["w4a8", "w8a16", "w4a16", "int8", "int16"],
+        help="Apply post-training quantization to both encoders during compilation. "
+             "If provided without a value, defaults to int16. (uses Quantize Job API).",
+    )
     parser.add_argument("--image-calibration-id", default=None,
                         help="QAI Hub dataset ID for image calibration data (from upload_calibration.py)")
     parser.add_argument("--text-calibration-id", default=None,
@@ -118,12 +119,10 @@ def compile_model(
     image_calib_dataset,
     text_calib_dataset,
     topk: str,
-    faiss_compute_unit: str,
     persist_job_ids: bool = True,
     job_name_prefix: str = "",
     quantize: bool = False,
     quantize_type: str = "int16",
-    quantize_target: str = "both",
 ):
     """Submit compile jobs and persist compile job IDs to job_ids.json.
 
@@ -139,10 +138,6 @@ def compile_model(
     if quantize:
         if image_calib_dataset is None or text_calib_dataset is None:
             raise ValueError("quantize=True requires image_calib_dataset and text_calib_dataset")
-        qtgt = (quantize_target or "both").lower().strip()
-        if qtgt not in ("both", "image", "text"):
-            raise ValueError(f"Invalid quantize_target: {quantize_target}")
-
         qt = str(quantize_type).lower()
         if qt == "int8":
             w_dtype = qai_hub.QuantizeDtype.INT8
@@ -163,34 +158,28 @@ def compile_model(
             raise ValueError(f"Unsupported quantize_type for Quantize Job API: {quantize_type}")
 
         print("  Submitting quantize jobs...")
-        q_img = None
-        q_txt = None
-        if qtgt in ("both", "image"):
-            q_img = qai_hub.submit_quantize_job(
-                onnx_img,
-                calibration_data=image_calib_dataset,
-                weights_dtype=w_dtype,
-                activations_dtype=a_dtype,
-                name=f"{prefix}quantize :: image-encoder",
-            )
-        if qtgt in ("both", "text"):
-            q_txt = qai_hub.submit_quantize_job(
-                onnx_txt,
-                calibration_data=text_calib_dataset,
-                weights_dtype=w_dtype,
-                activations_dtype=a_dtype,
-                name=f"{prefix}quantize :: text-encoder",
-            )
+        q_img = qai_hub.submit_quantize_job(
+            onnx_img,
+            calibration_data=image_calib_dataset,
+            weights_dtype=w_dtype,
+            activations_dtype=a_dtype,
+            name=f"{prefix}quantize :: image-encoder",
+        )
+        q_txt = qai_hub.submit_quantize_job(
+            onnx_txt,
+            calibration_data=text_calib_dataset,
+            weights_dtype=w_dtype,
+            activations_dtype=a_dtype,
+            name=f"{prefix}quantize :: text-encoder",
+        )
 
         # Block until quantization completes, then compile the quantized ONNX model artifacts.
-        if q_img is not None:
-            quantized_img = q_img.get_target_model()
-            if quantized_img is None:
-                raise RuntimeError("Quantize job (image) failed to produce a target model.")
-        if q_txt is not None:
-            quantized_txt = q_txt.get_target_model()
-            if quantized_txt is None:
-                raise RuntimeError("Quantize job (text) failed to produce a target model.")
+        quantized_img = q_img.get_target_model()
+        if quantized_img is None:
+            raise RuntimeError("Quantize job (image) failed to produce a target model.")
+        quantized_txt = q_txt.get_target_model()
+        if quantized_txt is None:
+            raise RuntimeError("Quantize job (text) failed to produce a target model.")
 
     image_compile_job = qai_hub.submit_compile_job(
         model=quantized_img,
@@ -355,12 +344,10 @@ def run_pipeline(args, *, persist_job_ids: bool = True):
                 image_calib_dataset=image_calib_dataset,
                 text_calib_dataset=text_calib_dataset,
                 topk=args.topk,
-                faiss_compute_unit=args.faiss_compute_unit,
                 persist_job_ids=persist_job_ids,
                 job_name_prefix=f"{model_name} :: ",
                 quantize=(args.quantize is not None),
-                quantize_type=args.quantize_type,
-                quantize_target=(args.quantize or "both"),
+                quantize_type=(args.quantize or "int16"),
             ),
         }
 

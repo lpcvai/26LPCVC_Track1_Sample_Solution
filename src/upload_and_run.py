@@ -5,7 +5,7 @@ import qai_hub
 import compile_and_profile
 from inference import run_inference
 from upload_dataset import upload_datasets
-from utils import MODELS, MAX_INFERENCE_INFLIGHT, JOB_IDS, IMAGES_PER_BATCH, NUM_IMAGE_SAMPLES, CAPTIONS_PER_IMAGE, TOPK_IMAGES_PER_BATCH
+from utils import MODELS, MAX_INFERENCE_INFLIGHT, JOB_IDS, IMAGES_PER_BATCH, NUM_IMAGE_SAMPLES, CAPTIONS_PER_IMAGE
 
 
 def build_arg_parser():
@@ -30,10 +30,8 @@ def build_arg_parser():
                         help=f"Images per uploaded dataset batch when uploading (default from utils.py: {IMAGES_PER_BATCH}).")
     parser.add_argument("--num-images", type=int, default=None,
                         help=f"Number of images to evaluate/upload (default from utils.py: {NUM_IMAGE_SAMPLES}).")
-    parser.add_argument("--max-inflight", type=int, default=None,
-                        help=f"Max number of inference jobs to keep in-flight when batching (default: {MAX_INFERENCE_INFLIGHT}).")
     parser.add_argument("--topk-images-per-batch", type=int, default=None,
-                        help=f"Images per top-k inference job (default from utils.py: {TOPK_IMAGES_PER_BATCH}).")
+                        help="Images per top-k inference job (default: same as --images-per-batch).")
     return parser
 
 
@@ -94,7 +92,7 @@ def main(argv=None):
             text_dataset=text_dataset,
             onnx_dir=cj["onnx_dir"],
             faiss_compute_unit=args.faiss_compute_unit,
-            images_per_batch=int(args.topk_images_per_batch or TOPK_IMAGES_PER_BATCH),
+            images_per_batch=int(args.topk_images_per_batch or (args.images_per_batch or IMAGES_PER_BATCH)),
         )
         if faiss is None:
             raise SystemExit("Failed to compile FAISS index model.")
@@ -112,8 +110,8 @@ def main(argv=None):
         image_dataset_ids=image_dataset_ids,
         text_compiled_id=cj["text_compiled_id"],
         text_dataset_id=text_dataset_id,
-        max_inference_inflight=int(args.max_inflight or MAX_INFERENCE_INFLIGHT),
-        topk_images_per_batch=int(args.topk_images_per_batch or TOPK_IMAGES_PER_BATCH),
+        max_inference_inflight=int(MAX_INFERENCE_INFLIGHT),
+        topk_images_per_batch=int(args.topk_images_per_batch or (args.images_per_batch or IMAGES_PER_BATCH)),
     )
     print(f"Recall@10: {recall_at_10:.4f}  ({recall_at_10 * 100:.2f}%)")
 
