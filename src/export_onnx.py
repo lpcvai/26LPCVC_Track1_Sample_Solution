@@ -172,7 +172,7 @@ def export_models(
 def main(argv=None):
     parser = build_arg_parser()
     args = parser.parse_args(argv)
-    targets = list(MODELS) if args.all else [args.model]
+    targets = MODELS if args.all else [args.model]
     export_models(
         models=targets,
         image_size=int(args.image_size),
