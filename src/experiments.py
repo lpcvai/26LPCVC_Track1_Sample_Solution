@@ -31,7 +31,7 @@ def build_arg_parser():
     parser = argparse.ArgumentParser(description="Run compile and inference benchmarks across models/topk modes.")
     parser.add_argument("--models", nargs="*", default=None, choices=MODELS,
                         help="Models to benchmark. If omitted, benchmarks all models.")
-    parser.add_argument("--topk", choices=["cosine", "faiss", "both"], default="both",
+    parser.add_argument("--topk", choices=["cosine", "faiss", "both"], default="cosine",
                         help="Which topk mode(s) to benchmark.")
     parser.add_argument("--num-images", type=int, default=None,
                         help=f"Number of images to evaluate (default from utils.py: {NUM_IMAGE_SAMPLES}).")
