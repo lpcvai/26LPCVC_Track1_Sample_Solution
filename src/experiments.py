@@ -28,16 +28,12 @@ from utils import (
 
 
 def build_arg_parser():
-    parser = argparse.ArgumentParser(description="Run compile and inference benchmarks across models/topk modes.")
+    parser = argparse.ArgumentParser(description="Run compile and inference benchmarks across models.")
     parser.add_argument("--models", nargs="*", default=None, choices=MODELS,
                         help="Models to benchmark. If omitted, benchmarks all models.")
-    parser.add_argument("--topk", choices=["cosine", "faiss", "both"], default="cosine",
-                        help="Which topk mode(s) to benchmark.")
     parser.add_argument("--num-images", type=int, default=None,
                         help=f"Number of images to evaluate (default from utils.py: {NUM_IMAGE_SAMPLES}).")
     parser.add_argument("--device", default="Samsung Galaxy S25 (Family)", help="QAI Hub target device")
-    parser.add_argument("--faiss-compute-unit", choices=["all", "npu", "gpu", "cpu"], default="all",
-                        help="Compute unit for FAISS compile and inference jobs (only applies with --topk faiss)")
     # Optional arg:
     #   no flag => no quantization
     #   --quantize <type> => quantize both encoders using the given quantization type
@@ -189,7 +185,6 @@ def main(argv=None):
     num_images = int(args.num_images or NUM_IMAGE_SAMPLES)
     num_text = num_images * CAPTIONS_PER_IMAGE
     images_per_batch = int(args.images_per_batch or IMAGES_PER_BATCH)
-    topk_modes = ["cosine", "faiss"] if args.topk == "both" else [args.topk]
     calibration_samples = int(args.calibration_samples or NUM_CALIBRATION_SAMPLES)
     topk_images_per_batch = int(args.topk_images_per_batch or images_per_batch)
 
@@ -248,28 +243,18 @@ def main(argv=None):
         "runs": [],
     }
 
-    # Phase 1: submit compile jobs once per model (shared across cosine/faiss modes).
-    # Previously we compiled per (model, topk_mode), which doubled compile jobs and caused
-    # extra encoder inference work downstream.
+    # Phase 1: submit compile jobs once per model.
     compile_by_model: dict[str, dict] = {}
-    need_cosine = "cosine" in topk_modes
-    need_faiss = "faiss" in topk_modes
-    compile_topk_mode = "cosine" if need_cosine else "faiss"
 
     for model_name in models:
         print(f"\n{'=' * 70}")
-        print(f"Compile: model={model_name} topk={compile_topk_mode} quantize={args.quantize}")
+        print(f"Compile: model={model_name} topk=cosine quantize={args.quantize}")
         print(f"{'=' * 70}")
 
         run_args = argparse.Namespace(
             model=model_name,
             all=False,
-            # compile doesn't need datasets; keep these for compatibility with the compile module signature.
-            image_dataset_id=None,
-            text_dataset_id=None,
             device=args.device,
-            topk=compile_topk_mode,
-            faiss_compute_unit=args.faiss_compute_unit,
             profile=False,
             quantize=args.quantize,
             image_calibration_id=((model_to_datasets.get(model_name) or {}).get("calibration") or {}).get(
@@ -284,31 +269,25 @@ def main(argv=None):
             # its own compile job IDs, not "whatever was last written".
             compile_jobs = compile_and_profile.run_pipeline(run_args, persist_job_ids=False) or {}
         except Exception as e:
-            for topk_mode in topk_modes:
-                results["runs"].append({
-                    "model": model_name,
-                    "topk": topk_mode,
-                    "quantize": args.quantize,
-                    "faiss_compute_unit": args.faiss_compute_unit,
-                    "recall_at_10": None,
-                    "datasets": model_to_datasets.get(model_name),
-                    "error": f"compile_submit_failed: {type(e).__name__}: {e}",
-                })
+            results["runs"].append({
+                "model": model_name,
+                "quantize": args.quantize,
+                "recall_at_10": None,
+                "datasets": model_to_datasets.get(model_name),
+                "error": f"compile_submit_failed: {type(e).__name__}: {e}",
+            })
             print(f"  ERROR: compile submit failed: {type(e).__name__}: {e}")
             continue
 
         cj = compile_jobs.get(model_name)
         if cj is None:
-            for topk_mode in topk_modes:
-                results["runs"].append({
-                    "model": model_name,
-                    "topk": topk_mode,
-                    "quantize": args.quantize,
-                    "faiss_compute_unit": args.faiss_compute_unit,
-                    "recall_at_10": None,
-                    "datasets": model_to_datasets.get(model_name),
-                    "error": "compile_skipped_or_failed",
-                })
+            results["runs"].append({
+                "model": model_name,
+                "quantize": args.quantize,
+                "recall_at_10": None,
+                "datasets": model_to_datasets.get(model_name),
+                "error": "compile_skipped_or_failed",
+            })
             continue
 
         compile_by_model[model_name] = cj
@@ -329,21 +308,15 @@ def main(argv=None):
         """
         Evaluate one model. This is intentionally "one model at a time" to avoid exploding
         the number of concurrent Hub jobs.
-
-        Optimization: when both cosine and faiss are requested, run image encoder inference
-        once and (if needed) text encoder inference once, then reuse embeddings for both
-        top-k modes.
         """
         cj = compile_by_model[model_name]
         ds = model_to_datasets[model_name]
         image_dataset_ids = ds["image_dataset_ids"]
         text_dataset_id = ds["text_dataset_id"]
 
-        text_dataset = qai_hub.get_dataset(text_dataset_id) if (need_cosine or need_faiss) else None
-
+        text_dataset = qai_hub.get_dataset(text_dataset_id)
         image_compiled = qai_hub.get_job(cj["image_compiled_id"]).get_target_model()
-        text_compiled = qai_hub.get_job(cj["text_compiled_id"]).get_target_model() if (
-                need_cosine or need_faiss) else None
+        text_compiled = qai_hub.get_job(cj["text_compiled_id"]).get_target_model()
 
         def _inference_detail(job: qai_hub.InferenceJob):
             """
@@ -365,25 +338,20 @@ def main(argv=None):
 
         # Submit text encoder inference early so it can run in parallel with image batches.
         text_embs = None
-        text_inf_job = None
-        text_job_id = None
-        text_job_url = None
         text_wall_s = None
-        text_submitted_at = None
         text_detail = None
-        if need_cosine or need_faiss:
-            print(f"Submitting text encoder inference for {model_name}...")
-            text_submitted_at = time.time()
-            text_name = f"{prefix}{model_name} :: text"
-            text_inf_job = qai_hub.submit_inference_job(
-                model=text_compiled,
-                device=target_device,
-                inputs=text_dataset,
-                name=text_name,
-            )
-            text_job_id = text_inf_job.job_id
-            text_job_url = text_inf_job.url
-            # We'll compute wall time when we actually download outputs.
+        print(f"Submitting text encoder inference for {model_name}...")
+        text_submitted_at = time.time()
+        text_name = f"{prefix}{model_name} :: text"
+        text_inf_job = qai_hub.submit_inference_job(
+            model=text_compiled,
+            device=target_device,
+            inputs=text_dataset,
+            name=text_name,
+        )
+        text_job_id = text_inf_job.job_id
+        text_job_url = text_inf_job.url
+        # We'll compute wall time when we actually download outputs.
 
         # Submit image encoder inference in batches (multiple image datasets) to avoid Hub size limits.
         image_embs_parts = []
@@ -458,7 +426,7 @@ def main(argv=None):
         for i in range(len(image_dataset_ids)):
             image_embs_parts.append(results_by_idx[i])
 
-        if (need_cosine or need_faiss) and text_embs is None:
+        if text_embs is None:
             # If text inference didn't complete during image batching, block now.
             t_done = time.time()
             text_embs = np.concatenate(first_output_inference(text_inf_job), axis=0)
@@ -472,226 +440,105 @@ def main(argv=None):
         num_images = image_embs.shape[0]
 
         # Cosine top-k
-        if need_cosine:
-            topk_cosine_id = cj.get("topk_compiled_id")
-            topk_compiled = qai_hub.get_job(topk_cosine_id).get_target_model()
+        topk_cosine_id = cj.get("topk_compiled_id")
+        topk_compiled = qai_hub.get_job(topk_cosine_id).get_target_model()
 
-            # The compiled top-k model has a fixed batch dimension equal to the value used at ONNX export time
-            # (topk_images_per_batch). Submit multiple jobs over chunks, padding the final chunk to the fixed
-            # batch size and then slicing outputs back down.
-            topk_batch = int(topk_images_per_batch)
-            if topk_batch <= 0:
-                raise ValueError(f"Invalid topk batch size: {topk_batch}")
+        # The compiled top-k model has a fixed batch dimension equal to the value used at ONNX export time
+        # (topk_images_per_batch). Submit multiple jobs over chunks, padding the final chunk to the fixed
+        # batch size and then slicing outputs back down.
+        topk_batch = int(topk_images_per_batch)
+        if topk_batch <= 0:
+            raise ValueError(f"Invalid topk batch size: {topk_batch}")
 
-            num_topk_batches = (num_images + topk_batch - 1) // topk_batch
-            print(
-                f"Submitting cosine top-k inference for {model_name} (batch_size={topk_batch}, batches={num_topk_batches})...")
+        num_topk_batches = (num_images + topk_batch - 1) // topk_batch
+        print(
+            f"Submitting cosine top-k inference for {model_name} (batch_size={topk_batch}, batches={num_topk_batches})"
+        )
 
-            # Submit up to max_inflight top-k jobs in parallel.
-            topk_max_inflight = max(1, int(MAX_INFERENCE_INFLIGHT))
-            topk_jobs: list[dict] = []
-            results_by_batch: dict[int, np.ndarray] = {}
+        # Submit up to max_inflight top-k jobs in parallel.
+        topk_max_inflight = max(1, int(MAX_INFERENCE_INFLIGHT))
+        topk_jobs: list[dict] = []
+        results_by_batch: dict[int, np.ndarray] = {}
 
-            pending = list(range(num_topk_batches))
-            active: list[tuple[int, int, int, qai_hub.InferenceJob]] = []  # (bi, start, valid, job)
+        pending = list(range(num_topk_batches))
+        active: list[tuple[int, int, int, qai_hub.InferenceJob]] = []  # (bi, start, valid, job)
 
-            def _submit_one(bi: int):
-                start = bi * topk_batch
-                end = min(num_images, start + topk_batch)
-                chunk = image_embs[start:end]
-                valid = int(chunk.shape[0])
-                if valid < topk_batch:
-                    pad = np.zeros((topk_batch - valid, chunk.shape[1]), dtype=chunk.dtype)
-                    chunk = np.concatenate([chunk, pad], axis=0)
+        def _submit_one(bi: int):
+            start = bi * topk_batch
+            end = min(num_images, start + topk_batch)
+            chunk = image_embs[start:end]
+            valid = int(chunk.shape[0])
+            if valid < topk_batch:
+                pad = np.zeros((topk_batch - valid, chunk.shape[1]), dtype=chunk.dtype)
+                chunk = np.concatenate([chunk, pad], axis=0)
 
-                topk_name = f"{prefix}{model_name} :: topk-cosine {bi + 1}/{num_topk_batches}"
-                submitted_at = time.time()
-                topk_dataset = qai_hub.upload_dataset({"image_embs": [chunk], "text_embs": [text_embs]})
-                topk_inf_job = qai_hub.submit_inference_job(
-                    model=topk_compiled,
-                    device=target_device,
-                    inputs=topk_dataset,
-                    name=topk_name,
-                )
-                topk_jobs.append({
-                    "job_id": topk_inf_job.job_id,
-                    "url": topk_inf_job.url,
-                    "name": topk_name,
-                    "batch_index": bi,
-                    "batch_start": start,
-                    "batch_valid": valid,
-                    "batch_size": topk_batch,
-                    "submitted_at_epoch_s": submitted_at,
-                })
-                active.append((bi, start, valid, topk_inf_job))
-
-            while pending or active:
-                while pending and len(active) < topk_max_inflight:
-                    _submit_one(pending.pop(0))
-
-                progressed = False
-                still_active: list[tuple[int, int, int, qai_hub.InferenceJob]] = []
-                for bi, start, valid, job in active:
-                    st = job.get_status()
-                    if st.running or st.pending:
-                        still_active.append((bi, start, valid, job))
-                        continue
-
-                    t_done = time.time()
-                    out = first_output_inference(job)[0]
-                    results_by_batch[bi] = out[:valid]
-                    for rec in topk_jobs:
-                        if rec.get("batch_index") == bi and rec.get(
-                                "job_id") == job.job_id and "wall_time_s" not in rec:
-                            rec["wall_time_s"] = t_done - rec["submitted_at_epoch_s"]
-                            rec["hub_detail"] = _inference_detail(job)
-                            break
-                    progressed = True
-
-                active = still_active
-                if not progressed and active:
-                    time.sleep(2)
-
-            topk_parts = [results_by_batch[i] for i in range(num_topk_batches)]
-            topk_indices = np.concatenate(topk_parts, axis=0) if topk_parts else np.zeros((0, 0), dtype=np.int64)
-            recall_at_10 = _recall_from_topk_indices(topk_indices=topk_indices, num_images=num_images)
-            results["runs"].append({
-                "model": model_name,
-                "topk": "cosine",
-                "quantize": args.quantize,
-                "faiss_compute_unit": args.faiss_compute_unit,
-                "recall_at_10": recall_at_10,
-                "jobs": {
-                    "text": {"job_id": text_job_id, "url": text_job_url, "name": text_name, "wall_time_s": text_wall_s,
-                             "hub_detail": text_detail},
-                    "images": sorted(image_jobs, key=lambda r: r.get("batch_index", 0)),
-                    "topk": {"batch_size": topk_batch, "jobs": topk_jobs},
-                },
-                "job_ids_snapshot": _snapshot_for_run(
-                    cj=cj,
-                    image_dataset_ids=image_dataset_ids,
-                    text_dataset_id=text_dataset_id,
-                    topk_compiled_id=topk_cosine_id,
-                ),
-            })
-
-        # FAISS top-k
-        if need_faiss:
-            if text_embs is None:
-                raise RuntimeError("Internal error: missing text embeddings for FAISS evaluation")
-
-            # Build+compile FAISS index model using the already-computed text embeddings.
-            # This avoids a second text encoder inference job when both modes are requested.
-            faiss_compile = compile_and_profile.compile_faiss_index_model(
-                target_device=target_device,
-                onnx_dir=cj["onnx_dir"],
-                faiss_compute_unit=args.faiss_compute_unit,
-                persist_job_ids=False,
-                text_embs=text_embs,
-                job_name_prefix=f"{prefix}{model_name} ::",
-                images_per_batch=topk_images_per_batch,
+            topk_name = f"{prefix}{model_name} :: topk-cosine {bi + 1}/{num_topk_batches}"
+            submitted_at = time.time()
+            topk_dataset = qai_hub.upload_dataset({"image_embs": [chunk], "text_embs": [text_embs]})
+            topk_inf_job = qai_hub.submit_inference_job(
+                model=topk_compiled,
+                device=target_device,
+                inputs=topk_dataset,
+                name=topk_name,
             )
-            if not faiss_compile or not faiss_compile.get("topk_compiled_id"):
-                raise RuntimeError("FAISS index compile did not return a topk_compiled_id")
-            topk_faiss_id = faiss_compile["topk_compiled_id"]
-
-            topk_compiled = qai_hub.get_job(topk_faiss_id).get_target_model()
-
-            topk_batch = int(topk_images_per_batch)
-            if topk_batch <= 0:
-                raise ValueError(f"Invalid topk batch size: {topk_batch}")
-
-            num_topk_batches = (num_images + topk_batch - 1) // topk_batch
-            print(
-                f"Submitting FAISS top-k inference for {model_name} (batch_size={topk_batch}, batches={num_topk_batches})...")
-
-            topk_max_inflight = max(1, int(MAX_INFERENCE_INFLIGHT))
-            topk_jobs: list[dict] = []
-            results_by_batch: dict[int, np.ndarray] = {}
-
-            pending = list(range(num_topk_batches))
-            active: list[tuple[int, int, int, qai_hub.InferenceJob]] = []  # (bi, start, valid, job)
-
-            def _submit_one(bi: int):
-                start = bi * topk_batch
-                end = min(num_images, start + topk_batch)
-                chunk = image_embs[start:end]
-                valid = int(chunk.shape[0])
-                if valid < topk_batch:
-                    pad = np.zeros((topk_batch - valid, chunk.shape[1]), dtype=chunk.dtype)
-                    chunk = np.concatenate([chunk, pad], axis=0)
-
-                topk_name = f"{prefix}{model_name} :: topk-faiss {bi + 1}/{num_topk_batches}"
-                submitted_at = time.time()
-                topk_dataset = qai_hub.upload_dataset({"image_embs": [chunk]})
-                topk_inf_job = qai_hub.submit_inference_job(
-                    model=topk_compiled,
-                    device=target_device,
-                    inputs=topk_dataset,
-                    options=f"--compute_unit {args.faiss_compute_unit}",
-                    name=topk_name,
-                )
-                topk_jobs.append({
-                    "job_id": topk_inf_job.job_id,
-                    "url": topk_inf_job.url,
-                    "name": topk_name,
-                    "batch_index": bi,
-                    "batch_start": start,
-                    "batch_valid": valid,
-                    "batch_size": topk_batch,
-                    "submitted_at_epoch_s": submitted_at,
-                })
-                active.append((bi, start, valid, topk_inf_job))
-
-            while pending or active:
-                while pending and len(active) < topk_max_inflight:
-                    _submit_one(pending.pop(0))
-
-                progressed = False
-                still_active: list[tuple[int, int, int, qai_hub.InferenceJob]] = []
-                for bi, start, valid, job in active:
-                    st = job.get_status()
-                    if st.running or st.pending:
-                        still_active.append((bi, start, valid, job))
-                        continue
-
-                    t_done = time.time()
-                    out = first_output_inference(job)[0]
-                    results_by_batch[bi] = out[:valid]
-                    for rec in topk_jobs:
-                        if rec.get("batch_index") == bi and rec.get(
-                                "job_id") == job.job_id and "wall_time_s" not in rec:
-                            rec["wall_time_s"] = t_done - rec["submitted_at_epoch_s"]
-                            rec["hub_detail"] = _inference_detail(job)
-                            break
-                    progressed = True
-
-                active = still_active
-                if not progressed and active:
-                    time.sleep(2)
-
-            topk_parts = [results_by_batch[i] for i in range(num_topk_batches)]
-            topk_indices = np.concatenate(topk_parts, axis=0) if topk_parts else np.zeros((0, 0), dtype=np.int64)
-            recall_at_10 = _recall_from_topk_indices(topk_indices=topk_indices, num_images=num_images)
-            results["runs"].append({
-                "model": model_name,
-                "topk": "faiss",
-                "quantize": args.quantize,
-                "faiss_compute_unit": args.faiss_compute_unit,
-                "recall_at_10": recall_at_10,
-                "jobs": {
-                    "text": {"job_id": text_job_id, "url": text_job_url, "name": text_name, "wall_time_s": text_wall_s,
-                             "hub_detail": text_detail},
-                    "images": sorted(image_jobs, key=lambda r: r.get("batch_index", 0)),
-                    "topk": {"batch_size": topk_batch, "jobs": topk_jobs},
-                },
-                "job_ids_snapshot": _snapshot_for_run(
-                    cj=cj,
-                    image_dataset_ids=image_dataset_ids,
-                    text_dataset_id=text_dataset_id,
-                    topk_compiled_id=topk_faiss_id,
-                ),
+            topk_jobs.append({
+                "job_id": topk_inf_job.job_id,
+                "url": topk_inf_job.url,
+                "name": topk_name,
+                "batch_index": bi,
+                "batch_start": start,
+                "batch_valid": valid,
+                "batch_size": topk_batch,
+                "submitted_at_epoch_s": submitted_at,
             })
+            active.append((bi, start, valid, topk_inf_job))
+
+        while pending or active:
+            while pending and len(active) < topk_max_inflight:
+                _submit_one(pending.pop(0))
+
+            progressed = False
+            still_active: list[tuple[int, int, int, qai_hub.InferenceJob]] = []
+            for bi, start, valid, job in active:
+                st = job.get_status()
+                if st.running or st.pending:
+                    still_active.append((bi, start, valid, job))
+                    continue
+
+                t_done = time.time()
+                out = first_output_inference(job)[0]
+                results_by_batch[bi] = out[:valid]
+                for rec in topk_jobs:
+                    if rec.get("batch_index") == bi and rec.get("job_id") == job.job_id and "wall_time_s" not in rec:
+                        rec["wall_time_s"] = t_done - rec["submitted_at_epoch_s"]
+                        rec["hub_detail"] = _inference_detail(job)
+                        break
+                progressed = True
+
+            active = still_active
+            if not progressed and active:
+                time.sleep(2)
+
+        topk_parts = [results_by_batch[i] for i in range(num_topk_batches)]
+        topk_indices = np.concatenate(topk_parts, axis=0) if topk_parts else np.zeros((0, 0), dtype=np.int64)
+        recall_at_10 = _recall_from_topk_indices(topk_indices=topk_indices, num_images=num_images)
+        results["runs"].append({
+            "model": model_name,
+            "quantize": args.quantize,
+            "recall_at_10": recall_at_10,
+            "jobs": {
+                "text": {"job_id": text_job_id, "url": text_job_url, "name": text_name, "wall_time_s": text_wall_s,
+                         "hub_detail": text_detail},
+                "images": sorted(image_jobs, key=lambda r: r.get("batch_index", 0)),
+                "topk": {"batch_size": topk_batch, "jobs": topk_jobs},
+            },
+            "job_ids_snapshot": _snapshot_for_run(
+                cj=cj,
+                image_dataset_ids=image_dataset_ids,
+                text_dataset_id=text_dataset_id,
+                topk_compiled_id=topk_cosine_id,
+            ),
+        })
 
     # Evaluate models with limited concurrency to avoid creating a large number of Hub jobs.
     planned_models = [m for m in models if m in compile_by_model]
@@ -707,21 +554,18 @@ def main(argv=None):
                 ds = model_to_datasets.get(model_name) or {}
                 image_ids = ds.get("image_dataset_ids") or []
                 text_id = ds.get("text_dataset_id")
-                for topk_mode in topk_modes:
-                    results["runs"].append({
-                        "model": model_name,
-                        "topk": topk_mode,
-                        "quantize": args.quantize,
-                        "faiss_compute_unit": args.faiss_compute_unit,
-                        "recall_at_10": None,
-                        "job_ids_snapshot": _snapshot_for_run(
-                            cj=cj,
-                            image_dataset_ids=image_ids,
-                            text_dataset_id=text_id,
-                            topk_compiled_id=cj.get("topk_compiled_id"),
-                        ),
-                        "error": f"{type(e).__name__}: {e}",
-                    })
+                results["runs"].append({
+                    "model": model_name,
+                    "quantize": args.quantize,
+                    "recall_at_10": None,
+                    "job_ids_snapshot": _snapshot_for_run(
+                        cj=cj,
+                        image_dataset_ids=image_ids,
+                        text_dataset_id=text_id,
+                        topk_compiled_id=cj.get("topk_compiled_id"),
+                    ),
+                    "error": f"{type(e).__name__}: {e}",
+                })
                 print(f"  ERROR: {model_name}: {type(e).__name__}: {e}")
 
     out_path = args.output

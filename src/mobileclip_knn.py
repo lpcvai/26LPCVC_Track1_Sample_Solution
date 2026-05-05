@@ -5,7 +5,6 @@ import urllib.request
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-import faiss
 import numpy as np
 import open_clip
 import torch
@@ -122,20 +121,21 @@ image_embeddings = np.concatenate(all_image_embeddings, axis=0)
 np.save(os.path.join(RESULTS_PATH, "image_embeddings.npy"), image_embeddings)
 print(f"Saved image_embeddings.npy {image_embeddings.shape}")
 
-# ── FAISS KNN index over text embeddings ───────────────────────────────────────
-print("Building FAISS index...")
-dim = text_embeddings.shape[1]
-index = faiss.IndexFlatIP(dim)  # inner product == cosine sim for unit vectors
-index.add(text_embeddings)
-print(f"Index built: {index.ntotal} vectors")
-
-# Search all valid image embeddings at once
+# ── Cosine top-k over text embeddings (no FAISS) ──────────────────────────────
+# Inner product == cosine similarity because both embeddings are unit-normalized.
 valid_mask = ~np.any(np.isnan(image_embeddings), axis=1)
 valid_image_emb = np.ascontiguousarray(image_embeddings[valid_mask])
 valid_indices = np.where(valid_mask)[0]
 
 print(f"Searching top-{K} texts for {len(valid_image_emb)} images...")
-_, top_k_indices = index.search(valid_image_emb, K)  # [N_valid, K]
+text_t = torch.from_numpy(np.ascontiguousarray(text_embeddings)).to(torch.float32)  # CPU
+top_k_indices_parts: list[np.ndarray] = []
+for i in tqdm(range(0, len(valid_image_emb), BATCH_SIZE), unit="batch", desc=f"top{K}"):
+    batch = torch.from_numpy(valid_image_emb[i: i + BATCH_SIZE]).to(torch.float32)  # CPU
+    sims = batch @ text_t.T
+    topk = torch.topk(sims, K, dim=-1).indices
+    top_k_indices_parts.append(topk.cpu().numpy())
+top_k_indices = np.concatenate(top_k_indices_parts, axis=0) if top_k_indices_parts else np.zeros((0, K), dtype=np.int64)
 
 # ── Recall@10 ─────────────────────────────────────────────────────────────────
 print("Computing recall@10...")

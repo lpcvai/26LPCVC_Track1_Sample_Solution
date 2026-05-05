@@ -9,68 +9,31 @@ from pathlib import Path
 
 from dataset_registry import DatasetRegistry
 
-def _load_models_json(path: str = "models.json") -> tuple[list[str], dict[str, str], dict[str, dict]]:
-    p = Path(path)
-    if not p.exists():
-        return [], {}, {}
-    try:
-        obj = json.loads(p.read_text()) or {}
-    except Exception:
-        return [], {}, {}
-    models = obj.get("models")
-    if not isinstance(models, list):
-        return [], {}, {}
-    names: list[str] = []
-    pretrained: dict[str, str] = {}
-    meta: dict[str, dict] = {}
-    for m in models:
-        if not isinstance(m, dict):
-            continue
-        name = m.get("name")
-        mid = m.get("id")
-        if isinstance(name, str) and name.strip() and isinstance(mid, str) and mid.strip():
-            names.append(name.strip())
-            pretrained[name.strip()] = mid.strip()
-            meta[name.strip()] = m
-    return names, pretrained, meta
-
-
 # List of supported model names (kept as a list for CLI choices / iteration).
 # Mapping from model name -> open_clip pretrained tag.
-# These are primarily sourced from repo-root models.json.
-MODELS, MODEL_PRETRAINED, MODEL_META = _load_models_json()
 
-# Backwards-compatible fallback if models.json is missing/corrupt.
-if not MODELS or not MODEL_PRETRAINED:
-    MODELS = [
-        "MobileCLIP-S1",
-        "MobileCLIP2-S0",
-        "MobileCLIP2-S2",
-        "MobileCLIP2-B",
-        "MobileCLIP2-S3",
-    ]
-    MODEL_PRETRAINED = {
-        "MobileCLIP-S1": "datacompdr",
-        "MobileCLIP2-S0": "dfndr2b",
-        "MobileCLIP2-S2": "dfndr2b",
-        "MobileCLIP2-B": "dfndr2b",
-        "MobileCLIP2-S3": "dfndr2b",
-    }
-    MODEL_META = {}
+MODEL_PRETRAINED = {
+    "MobileCLIP-S1": "datacompdr",
+    "MobileCLIP2-S0": "dfndr2b",
+    "MobileCLIP2-S2": "dfndr2b",
+    "MobileCLIP2-B": "dfndr2b",
+    "MobileCLIP2-S3": "dfndr2b",
+}
+MODELS = list(MODEL_PRETRAINED.keys())
 
 NUM_IMAGE_SAMPLES = 1000
 # When NUM_IMAGE_SAMPLES is large, uploading/running inference on a single image dataset can exceed
 # QAI Hub's 2GB flatbuffer limit. Upload images in batches and run multiple inference jobs.
-IMAGES_PER_BATCH = 1000
+IMAGES_PER_BATCH = NUM_IMAGE_SAMPLES
 # When running top-k on-device, the full (N_images x N_text) similarity can exceed max runtime
 # for large N. Run top-k over image embeddings in chunks of this size.
-TOPK_IMAGES_PER_BATCH = 1000
+TOPK_IMAGES_PER_BATCH = IMAGES_PER_BATCH
 # When running many batched inference jobs, limit how many we keep in-flight at once
 # to avoid hammering the Hub API while still keeping throughput decent.
 MAX_INFERENCE_INFLIGHT = 2
 CAPTIONS_PER_IMAGE = 5
 K = 10
-NUM_CALIBRATION_SAMPLES = 200
+NUM_CALIBRATION_SAMPLES = NUM_IMAGE_SAMPLES
 
 # Used in baseline scripts, not in QAI exports
 BATCH_SIZE = 512
@@ -102,42 +65,37 @@ class JobIds:
         Loads JobIds data from JSON file
         Creates and add null values if the file does not exist
         """
+        raw: dict = {}
         if self.path.exists():
-            with self.path.open("r") as f:
-                self.data = json.load(f) or {}
-            # Backwards-compatible defaults for new fields.
-            if "text" not in self.data or not isinstance(self.data.get("text"), dict):
-                self.data["text"] = {}
-            if "image" not in self.data or not isinstance(self.data.get("image"), dict):
-                self.data["image"] = {}
-            if "topk" not in self.data or not isinstance(self.data.get("topk"), dict):
-                self.data["topk"] = {}
-            self.data["text"].setdefault("compiled_id", None)
-            self.data["text"].setdefault("dataset_id", None)
-            self.data["image"].setdefault("compiled_id", None)
-            # Images are always batched now; keep only dataset_ids.
-            self.data["image"].setdefault("dataset_ids", [])
-            # Top-k can have multiple compiled IDs (cosine vs faiss), so store a dict.
-            self.data["topk"].setdefault("compiled_ids", {})
+            try:
+                with self.path.open("r") as f:
+                    raw = json.load(f) or {}
+            except Exception:
+                raw = {}
 
-            # Remove legacy single-id fields if present to avoid accidental use.
-            if "dataset_id" in self.data["image"]:
-                self.data["image"].pop("dataset_id", None)
-            if "compiled_id" in self.data["topk"]:
-                # Migrate to compiled_ids, best-effort (assume cosine if unknown).
-                legacy = self.data["topk"].pop("compiled_id", None)
-                if legacy and "cosine" not in self.data["topk"]["compiled_ids"]:
-                    self.data["topk"]["compiled_ids"]["cosine"] = legacy
-            # Ensure file is normalized to include new fields.
-            self.save()
-            return
+        text_raw = raw.get("text") if isinstance(raw.get("text"), dict) else {}
+        image_raw = raw.get("image") if isinstance(raw.get("image"), dict) else {}
+        topk_raw = raw.get("topk") if isinstance(raw.get("topk"), dict) else {}
+
+        dataset_ids = image_raw.get("dataset_ids")
+        if not isinstance(dataset_ids, list):
+            dataset_ids = []
 
         self.data = {
-            "text": {"compiled_id": None, "dataset_id": None},
-            "image": {"compiled_id": None, "dataset_ids": []},
-            "topk": {"compiled_ids": {}},
+            "text": {
+                "compiled_id": text_raw.get("compiled_id"),
+                "dataset_id": text_raw.get("dataset_id"),
+            },
+            "image": {
+                "compiled_id": image_raw.get("compiled_id"),
+                "dataset_ids": dataset_ids,
+            },
+            "topk": {
+                "compiled_id": topk_raw.get("compiled_id"),
+            },
         }
-        # Ensure a valid initial file exists.
+
+        # Ensure a valid normalized file exists.
         self.save()
 
     def save(self):

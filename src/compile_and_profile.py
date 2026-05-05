@@ -1,33 +1,16 @@
 import argparse
 import os
 
-import numpy as np
 import onnx
 import qai_hub
-import torch
 
-from utils import RESULTS_PATH, MODELS, K, JOB_IDS, IMAGES_PER_BATCH
+from utils import RESULTS_PATH, MODELS, JOB_IDS
 
 # NOTE: This module is responsible for submitting compile/profile jobs.
 # Inference/evaluation lives in src/inference.py and src/upload_and_run.py.
 
 # ONNX element type codes → QAI Hub dtype strings
 ONNX_ELEM_TYPE = {1: "float32", 6: "int32", 7: "int64"}
-
-
-class FAISSIndexWrapper(torch.nn.Module):
-    """Mimics faiss.IndexFlatIP: text embeddings are baked in as weights (the
-    index), and only image embeddings are passed at inference time."""
-
-    def __init__(self, text_embs: np.ndarray, k: int):
-        super().__init__()
-        self.register_buffer("index", torch.from_numpy(text_embs))
-        self.k = k
-
-    def forward(self, image_embs):
-        # image_embs: [N_img, D] — L2-normalized
-        sims = image_embs @ self.index.T  # [N_img, N_txt]
-        return torch.topk(sims, self.k, dim=-1).indices.to(torch.int32)  # [N_img, K]
 
 
 def build_arg_parser():
@@ -41,10 +24,6 @@ def build_arg_parser():
     parser.add_argument("--device", default="XR2 Gen 2 (Proxy)", help="QAI Hub target device")
     parser.add_argument("--onnx-root", default=os.path.join(RESULTS_PATH, "onnx"),
                         help="Root directory where ONNX artifacts live (default: <results_path>/onnx).")
-    parser.add_argument("--topk", choices=["cosine", "faiss"], default="cosine",
-                        help="How to compute top-k on the QAS device: cosine(default) or via FAISS")
-    parser.add_argument("--faiss-compute-unit", choices=["all", "npu", "gpu", "cpu"], default="all",
-                        help="Compute unit for FAISS compile and inference jobs (only applies with --topk faiss)")
     parser.add_argument("--profile", action="store_true", help="Submit profile jobs after recall is computed")
     # Optional arg:
     #   no flag => no quantization
@@ -110,19 +89,17 @@ def load_and_validate(path, label):
 
 
 def compile_model(
-    *,
-    target_device,
-    onnx_img,
-    onnx_txt,
-    onnx_topk,
-    compile_options: str,
-    image_calib_dataset,
-    text_calib_dataset,
-    topk: str,
-    persist_job_ids: bool = True,
-    job_name_prefix: str = "",
-    quantize: bool = False,
-    quantize_type: str = "int16",
+        *,
+        target_device,
+        onnx_img,
+        onnx_txt,
+        onnx_topk,
+        compile_options: str,
+        image_calib_dataset,
+        text_calib_dataset,
+        persist_job_ids: bool = True,
+        job_name_prefix: str = "",
+        quantize_type: str | None = None,
 ):
     """Submit compile jobs and persist compile job IDs to job_ids.json.
 
@@ -135,9 +112,9 @@ def compile_model(
     # Quantize Job API (preferred) – replaces deprecated --quantize_full_type.
     quantized_img = onnx_img
     quantized_txt = onnx_txt
-    if quantize:
+    if quantize_type is not None:
         if image_calib_dataset is None or text_calib_dataset is None:
-            raise ValueError("quantize=True requires image_calib_dataset and text_calib_dataset")
+            raise ValueError("quantize_type requires image_calib_dataset and text_calib_dataset")
         qt = str(quantize_type).lower()
         if qt == "int8":
             w_dtype = qai_hub.QuantizeDtype.INT8
@@ -199,96 +176,23 @@ def compile_model(
         JOB_IDS["image", "compiled_id"] = image_compile_job.job_id
         JOB_IDS["text", "compiled_id"] = text_compile_job.job_id
 
-    topk_compile_job = None
-    if topk == "cosine":
-        topk_compile_job = qai_hub.submit_compile_job(
-            model=onnx_topk,
-            device=target_device,
-            input_specs=get_input_specs(onnx_topk),
-            options=compile_options,
-            name=f"{prefix}topk-cosine",
-        )
-        if persist_job_ids:
-            compiled_ids = (JOB_IDS.data.get("topk") or {}).get("compiled_ids") or {}
-            compiled_ids["cosine"] = topk_compile_job.job_id
-            JOB_IDS["topk", "compiled_ids"] = compiled_ids
-        print(f"  Compile job IDs — image: {image_compile_job.job_id}, text: {text_compile_job.job_id}, topk: {topk_compile_job.job_id}")
-    else:
-        print(f"  Compile job IDs — image: {image_compile_job.job_id}, text: {text_compile_job.job_id}")
+    topk_compile_job = qai_hub.submit_compile_job(
+        model=onnx_topk,
+        device=target_device,
+        input_specs=get_input_specs(onnx_topk),
+        options=compile_options,
+        name=f"{prefix}topk-cosine",
+    )
+    if persist_job_ids:
+        JOB_IDS["topk", "compiled_id"] = topk_compile_job.job_id
+    print(
+        f"  Compile job IDs — image: {image_compile_job.job_id}, text: {text_compile_job.job_id}, topk: {topk_compile_job.job_id}"
+    )
 
     return {
         "image_compiled_id": image_compile_job.job_id,
         "text_compiled_id": text_compile_job.job_id,
-        "topk_compiled_id": topk_compile_job.job_id if topk_compile_job is not None else None,
-    }
-
-
-def compile_faiss_index_model(
-    *,
-    target_device,
-    text_compiled=None,
-    text_dataset=None,
-    onnx_dir: str,
-    faiss_compute_unit: str,
-    persist_job_ids: bool = True,
-    text_embs: np.ndarray | None = None,
-    job_name_prefix: str = "",
-    images_per_batch: int = IMAGES_PER_BATCH,
-):
-    """Build a FAISS index model by running text inference, baking embeddings, and compiling."""
-    if text_embs is None:
-        if text_compiled is None or text_dataset is None:
-            raise ValueError("compile_faiss_index_model requires either text_embs or (text_compiled and text_dataset)")
-        prefix = (job_name_prefix.strip() + " ") if job_name_prefix and job_name_prefix.strip() else ""
-        print("  Running text encoder inference to build FAISS index...")
-        text_inf_job = qai_hub.submit_inference_job(
-            model=text_compiled,
-            device=target_device,
-            inputs=text_dataset,
-            name=f"{prefix}faiss-index :: text",
-        )
-        text_embs = np.concatenate(first_output(text_inf_job), axis=0)
-
-    # Ensure embeddings are normalized (compile-time constants in the wrapper).
-    text_embs = text_embs / np.linalg.norm(text_embs, axis=1, keepdims=True)
-
-    faiss_model = FAISSIndexWrapper(text_embs, k=K).eval()
-    faiss_onnx_path = os.path.join(onnx_dir, "faiss_index.onnx")
-    dummy_img_embs = torch.rand(int(images_per_batch), text_embs.shape[1], dtype=torch.float32)
-    print(f"  Exporting FAISS index model → {faiss_onnx_path}...")
-    torch.onnx.export(
-        faiss_model,
-        dummy_img_embs,
-        faiss_onnx_path,
-        input_names=["image_embs"],
-        output_names=["topk_indices"],
-        opset_version=18,
-        do_constant_folding=True,
-        dynamic_axes=None,
-        verbose=False,
-        export_params=True,
-        training=torch.onnx.TrainingMode.EVAL,
-        dynamo=True,
-    )
-    onnx_faiss = load_and_validate(faiss_onnx_path, "FAISS index")
-    if onnx_faiss is None:
-        return None
-
-    prefix = (job_name_prefix.strip() + " ") if job_name_prefix and job_name_prefix.strip() else ""
-    faiss_compile_job = qai_hub.submit_compile_job(
-        model=onnx_faiss,
-        device=target_device,
-        input_specs=get_input_specs(onnx_faiss),
-        options=f"--target_runtime qnn_dlc --compute_unit {faiss_compute_unit}",
-        name=f"{prefix}topk-faiss",
-    )
-    if persist_job_ids:
-        compiled_ids = (JOB_IDS.data.get("topk") or {}).get("compiled_ids") or {}
-        compiled_ids["faiss"] = faiss_compile_job.job_id
-        JOB_IDS["topk", "compiled_ids"] = compiled_ids
-    print(f"  FAISS compile job ID: {faiss_compile_job.job_id}")
-    return {
-        "topk_compiled_id": faiss_compile_job.job_id,
+        "topk_compiled_id": topk_compile_job.job_id,
     }
 
 
@@ -320,17 +224,15 @@ def run_pipeline(args, *, persist_job_ids: bool = True):
         text_onnx_path = os.path.join(onnx_dir, "text_encoder.onnx")
         topk_onnx_path = os.path.join(onnx_dir, "topk_retrieval.onnx")
 
-        required_paths = [image_onnx_path, text_onnx_path]
-        if args.topk == "cosine":
-            required_paths.append(topk_onnx_path)
+        required_paths = [image_onnx_path, text_onnx_path, topk_onnx_path]
         if not all(os.path.exists(p) for p in required_paths):
             print("  Skipping: ONNX not found. Run: python src/export_onnx.py --all")
             continue
 
         onnx_img = load_and_validate(image_onnx_path, "image encoder")
         onnx_txt = load_and_validate(text_onnx_path, "text encoder")
-        onnx_topk = load_and_validate(topk_onnx_path, "top-k retrieval") if args.topk == "cosine" else None
-        if onnx_img is None or onnx_txt is None or (args.topk == "cosine" and onnx_topk is None):
+        onnx_topk = load_and_validate(topk_onnx_path, "top-k retrieval")
+        if onnx_img is None or onnx_txt is None or onnx_topk is None:
             continue
 
         compile_jobs[model_name] = {
@@ -343,11 +245,9 @@ def run_pipeline(args, *, persist_job_ids: bool = True):
                 compile_options=compile_options,
                 image_calib_dataset=image_calib_dataset,
                 text_calib_dataset=text_calib_dataset,
-                topk=args.topk,
                 persist_job_ids=persist_job_ids,
                 job_name_prefix=f"{model_name} :: ",
-                quantize=(args.quantize is not None),
-                quantize_type=(args.quantize or "int16"),
+                quantize_type=args.quantize,
             ),
         }
 
@@ -356,23 +256,43 @@ def run_pipeline(args, *, persist_job_ids: bool = True):
         for model_name, cj in compile_jobs.items():
             image_compiled = qai_hub.get_job(cj["image_compiled_id"]).get_target_model()
             text_compiled = qai_hub.get_job(cj["text_compiled_id"]).get_target_model()
-            compiled_models[model_name] = [image_compiled, text_compiled]
-            if args.topk == "cosine" and cj.get("topk_compiled_id") is not None:
-                topk_compiled = qai_hub.get_job(cj["topk_compiled_id"]).get_target_model()
-                compiled_models[model_name].append(topk_compiled)
+            topk_compiled = qai_hub.get_job(cj["topk_compiled_id"]).get_target_model()
+            compiled_models[model_name] = [
+                ("image-encoder", image_compiled),
+                ("text-encoder", text_compiled),
+                ("topk-cosine", topk_compiled),
+            ]
 
     if args.profile:
         print(f"\n{'─' * 60}")
         print("Submitting profile jobs...")
+
+        def _submit_profile_job(*, m, name: str):
+            # Not all qai_hub versions accept a `name=` kwarg for profile jobs. Try it first,
+            # then fall back without naming to avoid breaking functionality.
+            try:
+                return qai_hub.submit_profile_job(
+                    model=m,
+                    device=target_device,
+                    options="--max_profiler_iterations 100",
+                    name=name,
+                )
+            except TypeError:
+                return qai_hub.submit_profile_job(
+                    model=m,
+                    device=target_device,
+                    options="--max_profiler_iterations 100",
+                )
+
         for model_name, models in compiled_models.items():
-            jobs = [
-                qai_hub.submit_profile_job(model=m, device=target_device, options="--max_profiler_iterations 100")
-                for m in models
-            ]
+            jobs = []
+            for label, m in models:
+                jobs.append(_submit_profile_job(m=m, name=f"{model_name} :: profile {label}"))
             print(f"  {model_name}: {[j.job_id for j in jobs]}")
 
     # Return compile job IDs for programmatic use (experiments / combined runner).
-    return {k: {kk: vv for kk, vv in v.items() if kk.endswith("_id") or kk == "onnx_dir"} for k, v in compile_jobs.items()}
+    return {k: {kk: vv for kk, vv in v.items() if kk.endswith("_id") or kk == "onnx_dir"} for k, v in
+            compile_jobs.items()}
 
 
 def main(argv=None):

@@ -1,7 +1,6 @@
 Ideally, run on all models
-  - baseline (no faiss)
-  - faiss w cpu
-  - faiss w gpu
+  - baseline
+  - cosine top-k (single mode)
 
 Play around with truncate_64bit_io??
 

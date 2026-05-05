@@ -35,21 +35,14 @@ def build_arg_parser():
     parser.add_argument("--image-compiled-id", default=JOB_IDS["image", "compiled_id"],
                         help="Compile job ID for the image encoder. If omitted, uses job_ids.json.")
     parser.add_argument("--text-compiled-id", default=JOB_IDS["text", "compiled_id"],
-                        help="Compile job ID for the text encoder (required for --topk cosine). "
-                             "If omitted, uses job_ids.json.")
-    # Top-k may have multiple compiled ids (cosine vs faiss); user should pass --topk-compiled-id
-    # explicitly for inference.py, or rely on job_ids.json's topk.compiled_ids.<mode>.
+                        help="Compile job ID for the text encoder. If omitted, uses job_ids.json.")
     parser.add_argument("--topk-compiled-id", default=None,
-                        help="Compile job ID for the top-k model (topk_retrieval or faiss_index). "
-                             "If omitted, uses job_ids.json based on --topk.")
+                        help="Compile job ID for the cosine top-k model (topk_retrieval.onnx). "
+                             "If omitted, uses job_ids.json.")
     parser.add_argument("--image-dataset-ids", default=None,
                         help="Comma-separated list of image dataset ids (batched). Overrides job_ids.json.")
     parser.add_argument("--text-dataset-id", default=JOB_IDS["text", "dataset_id"],
-                        help="QAI Hub dataset ID for texts (required for --topk cosine). If omitted, uses job_ids.json.")
-    parser.add_argument("--topk", choices=["cosine", "faiss"], default="cosine",
-                        help="Top-k method used when the model was compiled")
-    parser.add_argument("--faiss-compute-unit", choices=["all", "npu", "gpu", "cpu"], default="all",
-                        help="Compute unit for the FAISS inference job (only applies with --topk faiss)")
+                        help="QAI Hub dataset ID for texts. If omitted, uses job_ids.json.")
     parser.add_argument("--device", default="XR2 Gen 2 (Proxy)", help="QAI Hub target device")
     parser.add_argument("--job-name-prefix", default="",
                         help="Optional prefix for QAI Hub job names to make jobs easier to identify in the UI.")
@@ -61,13 +54,11 @@ def build_arg_parser():
 def run_inference(
     *,
     device: str,
-    topk: str,
-    faiss_compute_unit: str,
     image_compiled_id: str,
     topk_compiled_id: str,
     image_dataset_ids: list[str],
-    text_compiled_id: str | None = None,
-    text_dataset_id: str | None = None,
+    text_compiled_id: str,
+    text_dataset_id: str,
     job_name_prefix: str = "",
     max_inference_inflight: int = 2,
     topk_images_per_batch: int | None = None,
@@ -79,11 +70,10 @@ def run_inference(
         missing.append("topk_compiled_id")
     if not image_dataset_ids:
         missing.append("image_dataset_ids")
-    if topk == "cosine":
-        if text_compiled_id is None:
-            missing.append("text_compiled_id")
-        if text_dataset_id is None:
-            missing.append("text_dataset_id")
+    if text_compiled_id is None:
+        missing.append("text_compiled_id")
+    if text_dataset_id is None:
+        missing.append("text_dataset_id")
     if missing:
         raise ValueError(f"Missing required inputs: {missing}")
 
@@ -95,20 +85,18 @@ def run_inference(
     topk_compiled = qai_hub.get_job(topk_compiled_id).get_target_model()
 
     # ── Encoder inference ───────────────────────────────────────────────────
-    # Submit the text encoder job early (cosine mode) so it can run in parallel with
-    # the batched image encoder jobs.
+    # Submit the text encoder job early so it can run in parallel with the batched image encoder jobs.
     text_embs = None
     text_inf_job = None
-    if topk == "cosine":
-        text_compiled = qai_hub.get_job(text_compiled_id).get_target_model()
-        text_dataset = qai_hub.get_dataset(text_dataset_id)
-        print("Submitting text encoder inference...")
-        text_inf_job = qai_hub.submit_inference_job(
-            model=text_compiled,
-            device=target_device,
-            inputs=text_dataset,
-            name=f"{prefix}text-encoder",
-        )
+    text_compiled = qai_hub.get_job(text_compiled_id).get_target_model()
+    text_dataset = qai_hub.get_dataset(text_dataset_id)
+    print("Submitting text encoder inference...")
+    text_inf_job = qai_hub.submit_inference_job(
+        model=text_compiled,
+        device=target_device,
+        inputs=text_dataset,
+        name=f"{prefix}text-encoder",
+    )
 
     image_embs_parts = []
     # Keep multiple inference jobs in-flight to improve throughput.
@@ -161,7 +149,7 @@ def run_inference(
     for i in range(len(image_dataset_ids)):
         image_embs_parts.append(results_by_idx[i])
 
-    if topk == "cosine" and text_embs is None:
+    if text_embs is None:
         # If it didn't finish during the image loop, block now.
         text_embs = np.concatenate(first_output(text_inf_job), axis=0)
         text_embs = text_embs / np.linalg.norm(text_embs, axis=1, keepdims=True)
@@ -176,7 +164,7 @@ def run_inference(
         raise ValueError(f"Invalid topk batch size: {topk_batch}")
 
     num_topk_batches = (total_images + topk_batch - 1) // topk_batch
-    print(f"Submitting top-k inference (mode={topk}, batch_size={topk_batch}, batches={num_topk_batches})...")
+    print(f"Submitting cosine top-k inference (batch_size={topk_batch}, batches={num_topk_batches})...")
 
     topk_max_inflight = max(1, int(max_inference_inflight))
     pending = list(range(num_topk_batches))
@@ -192,23 +180,13 @@ def run_inference(
             pad = np.zeros((topk_batch - valid, chunk.shape[1]), dtype=chunk.dtype)
             chunk = np.concatenate([chunk, pad], axis=0)
 
-        if topk == "cosine":
-            topk_dataset = qai_hub.upload_dataset({"image_embs": [chunk], "text_embs": [text_embs]})
-            job = qai_hub.submit_inference_job(
-                model=topk_compiled,
-                device=target_device,
-                inputs=topk_dataset,
-                name=f"{prefix}topk-cosine {bi + 1}/{num_topk_batches}",
-            )
-        else:
-            topk_dataset = qai_hub.upload_dataset({"image_embs": [chunk]})
-            job = qai_hub.submit_inference_job(
-                model=topk_compiled,
-                device=target_device,
-                inputs=topk_dataset,
-                options=f"--compute_unit {faiss_compute_unit}",
-                name=f"{prefix}topk-faiss {bi + 1}/{num_topk_batches}",
-            )
+        topk_dataset = qai_hub.upload_dataset({"image_embs": [chunk], "text_embs": [text_embs]})
+        job = qai_hub.submit_inference_job(
+            model=topk_compiled,
+            device=target_device,
+            inputs=topk_dataset,
+            name=f"{prefix}topk-cosine {bi + 1}/{num_topk_batches}",
+        )
         active.append((bi, valid, job))
 
     while pending or active:
@@ -250,9 +228,7 @@ def main(argv=None):
     if args.image_compiled_id is None:
         missing.append("--image-compiled-id")
     if args.topk_compiled_id is None:
-        # Resolve from job_ids.json: topk.compiled_ids[<mode>]
-        compiled_ids = (JOB_IDS.data.get("topk") or {}).get("compiled_ids") or {}
-        args.topk_compiled_id = compiled_ids.get(args.topk)
+        args.topk_compiled_id = (JOB_IDS.data.get("topk") or {}).get("compiled_id")
         if args.topk_compiled_id is None:
             missing.append("--topk-compiled-id")
     # Resolve batched image dataset ids.
@@ -263,11 +239,10 @@ def main(argv=None):
 
     if not image_dataset_ids:
         missing.append("--image-dataset-ids")
-    if args.topk == "cosine":
-        if args.text_compiled_id is None:
-            missing.append("--text-compiled-id")
-        if args.text_dataset_id is None:
-            missing.append("--text-dataset-id")
+    if args.text_compiled_id is None:
+        missing.append("--text-compiled-id")
+    if args.text_dataset_id is None:
+        missing.append("--text-dataset-id")
     if missing:
         parser.error(
             "Missing required parameters (and no defaults in job_ids.json): "
@@ -277,8 +252,6 @@ def main(argv=None):
 
     recall_at_10 = run_inference(
         device=args.device,
-        topk=args.topk,
-        faiss_compute_unit=args.faiss_compute_unit,
         image_compiled_id=args.image_compiled_id,
         topk_compiled_id=args.topk_compiled_id,
         image_dataset_ids=image_dataset_ids,

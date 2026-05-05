@@ -9,7 +9,7 @@ from utils import MODELS, MAX_INFERENCE_INFLIGHT, JOB_IDS, IMAGES_PER_BATCH, NUM
 
 
 def build_arg_parser():
-    # Parent parser provides compile flags (model/all, device, topk, quantize, etc.).
+    # Parent parser provides compile flags (model/all, device, quantize, etc.).
     cap_parser = compile_and_profile.build_arg_parser()
     parser = argparse.ArgumentParser(
         description="Upload datasets to QAI Hub, then compile + run inference (combined runner).",
@@ -81,30 +81,11 @@ def main(argv=None):
         raise SystemExit("No compile jobs were submitted (missing ONNX artifacts?).")
 
     topk_compiled_id = cj.get("topk_compiled_id")
-    if args.topk == "faiss":
-        # Build/compile the FAISS index topk model (requires text encoder compiled model + text dataset).
-        target_device = qai_hub.Device(args.device)
-        text_dataset = qai_hub.get_dataset(args.text_dataset_id)
-        text_compiled = qai_hub.get_job(cj["text_compiled_id"]).get_target_model()
-        faiss = compile_and_profile.compile_faiss_index_model(
-            target_device=target_device,
-            text_compiled=text_compiled,
-            text_dataset=text_dataset,
-            onnx_dir=cj["onnx_dir"],
-            faiss_compute_unit=args.faiss_compute_unit,
-            images_per_batch=int(args.topk_images_per_batch or (args.images_per_batch or IMAGES_PER_BATCH)),
-        )
-        if faiss is None:
-            raise SystemExit("Failed to compile FAISS index model.")
-        topk_compiled_id = faiss["topk_compiled_id"]
-
     if topk_compiled_id is None:
         raise SystemExit("Missing topk compiled id. Did the topk compile step run successfully?")
 
     recall_at_10 = run_inference(
         device=args.device,
-        topk=args.topk,
-        faiss_compute_unit=args.faiss_compute_unit,
         image_compiled_id=cj["image_compiled_id"],
         topk_compiled_id=topk_compiled_id,
         image_dataset_ids=image_dataset_ids,

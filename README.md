@@ -59,7 +59,7 @@ dataset `yerevann/coco-karpathy` for upload/eval and will write outputs under `r
 
 ### Basic Runs
 
-Run all models with both top-k modes:
+Run all models (cosine top-k):
 
 ```bash
 python src/experiments.py
@@ -71,17 +71,7 @@ Run a single model:
 python src/experiments.py --models "MobileCLIP2-S0"
 ```
 
-Run cosine top-k only:
-
-```bash
-python src/experiments.py --topk "cosine"
-```
-
-Run FAISS top-k only (also selects a compute unit for FAISS compilation/inference):
-
-```bash
-python src/experiments.py --topk "faiss" --faiss-compute-unit "gpu"
-```
+Top-k is always cosine (FAISS support has been removed).
 
 Write results to a specific file:
 
@@ -176,9 +166,7 @@ The flags for `src/experiments.py` are defined via `argparse`. Help text:
 ```text
 usage: experiments.py [-h]
                       [--models [{MobileCLIP-S1,MobileCLIP2-S0,MobileCLIP2-S2,MobileCLIP2-B,MobileCLIP2-S3} ...]]
-                      [--topk {cosine,faiss,both}] [--num-images NUM_IMAGES]
-                      [--device DEVICE]
-                      [--faiss-compute-unit {all,npu,gpu,cpu}]
+                      [--num-images NUM_IMAGES] [--device DEVICE]
                       [--quantize [{w4a8,w8a16,w4a16,int8,int16}]]
                       [--image-calibration-id IMAGE_CALIBRATION_ID]
                       [--text-calibration-id TEXT_CALIBRATION_ID]
@@ -189,22 +177,17 @@ usage: experiments.py [-h]
                       [--cache | --no-cache]
                       [--cache-write | --no-cache-write]
 
-Run compile and inference benchmarks across models/topk modes.
+Run compile and inference benchmarks across models (cosine top-k).
 
 options:
   -h, --help            show this help message and exit
   --models [{MobileCLIP-S1,MobileCLIP2-S0,MobileCLIP2-S2,MobileCLIP2-B,MobileCLIP2-S3} ...]
                         Models to benchmark. If omitted, benchmarks all
                         models.
-  --topk {cosine,faiss,both}
-                        Which topk mode(s) to benchmark.
   --num-images NUM_IMAGES
                         Number of images to evaluate (default from utils.py:
                         1000).
   --device DEVICE       QAI Hub target device
-  --faiss-compute-unit {all,npu,gpu,cpu}
-                        Compute unit for FAISS compile and inference jobs
-                        (only applies with --topk faiss)
   --quantize [{w4a8,w8a16,w4a16,int8,int16}]
                         Apply post-training quantization to both encoders
                         during compilation. If provided without a value,
