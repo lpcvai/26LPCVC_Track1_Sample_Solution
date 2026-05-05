@@ -28,14 +28,14 @@ from utils import (
 
 
 def build_arg_parser():
-    parser = argparse.ArgumentParser(description="Run compile+inference benchmarks across models/topk modes.")
-    parser.add_argument("--models", nargs="*", default=None, choices=list(MODELS),
+    parser = argparse.ArgumentParser(description="Run compile and inference benchmarks across models/topk modes.")
+    parser.add_argument("--models", nargs="*", default=None, choices=MODELS,
                         help="Models to benchmark. If omitted, benchmarks all models.")
     parser.add_argument("--topk", choices=["cosine", "faiss", "both"], default="both",
                         help="Which topk mode(s) to benchmark.")
     parser.add_argument("--num-images", type=int, default=None,
                         help=f"Number of images to evaluate (default from utils.py: {NUM_IMAGE_SAMPLES}).")
-    parser.add_argument("--device", default="XR2 Gen 2 (Proxy)", help="QAI Hub target device")
+    parser.add_argument("--device", default="Samsung Galaxy S25 (Family)", help="QAI Hub target device")
     parser.add_argument("--faiss-compute-unit", choices=["all", "npu", "gpu", "cpu"], default="all",
                         help="Compute unit for FAISS compile and inference jobs (only applies with --topk faiss)")
     # Optional arg:
@@ -65,15 +65,15 @@ def build_arg_parser():
                         help="Optional prefix for QAI Hub inference job names to make jobs easier to identify in the UI.")
     parser.add_argument("--output", default=None, help="Optional path to write a JSON summary.")
     parser.add_argument("--cache", default=True, action=argparse.BooleanOptionalAction,
-                        help="Reuse datasets via datasets.json (default: enabled).")
+                        help="Reuse datasets via datasets.json.")
     parser.add_argument("--cache-write", default=True, action=argparse.BooleanOptionalAction,
-                        help="Write uploaded dataset info into datasets.json (default: enabled).")
+                        help="Write uploaded dataset info into datasets.json.")
     return parser
 
 
 def _dataset_profile(model_name: str) -> str:
     """
-    Produce a small signature for the model's preprocess+tokenizer, so models with identical
+    Produce a small signature for the model's preprocess and tokenizer, so models with identical
     input requirements can reuse the same uploaded datasets.
     """
     pretrained = MODEL_PRETRAINED[model_name]
@@ -209,7 +209,7 @@ def main(argv=None):
     # exporting/compiling into a parameterized directory. This makes repeated runs reuse
     # the same ONNX artifacts instead of generating a new folder each time.
     #
-    # NOTE: Top-k ONNX export shape depends on num_images + topk_images_per_batch.
+    # NOTE: Top-k ONNX export shape depends on num_images and topk_images_per_batch.
     onnx_key = f"img224_numimg{num_images}_topkbatch{topk_images_per_batch}_cap{CAPTIONS_PER_IMAGE}"
     onnx_root = os.path.join(RESULTS_PATH, "onnx_experiments", onnx_key)
 
@@ -330,7 +330,7 @@ def main(argv=None):
         Evaluate one model. This is intentionally "one model at a time" to avoid exploding
         the number of concurrent Hub jobs.
 
-        Optimization: when both cosine+faiss are requested, run image encoder inference
+        Optimization: when both cosine and faiss are requested, run image encoder inference
         once and (if needed) text encoder inference once, then reuse embeddings for both
         top-k modes.
         """
