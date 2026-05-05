@@ -1,122 +1,243 @@
-# LPCVC 2026 Track 1 - Image-to-Text Retrieval Solution
+# MobileCLIP QAI Hub Benchmarking
 
-## For Submissions
+This repo benchmarks multiple MobileCLIP variants on Qualcomm AI Hub (QAI Hub) by:
 
-Check out [this repo](https://github.com/lpcvai/25LPCVC_AIHub_Guide) for more details on how to run models on AIHub.
+1. Exporting models to ONNX
+2. Uploading evaluation datasets to QAI Hub
+3. Compiling for a target device
+4. Running inference and computing Recall@10
 
-## Overview
+The main “end-to-end” entrypoint is `src/experiments.py`.
 
-This repository contains Python scripts designed to extract, compile, and profile the OpenAI-CLIP's image and text encoders using the `qai_hub` library. It also includes scripts for uploading datasets and running inference with evaluation metrics such as Recall@10.
+## Environment Setup
 
-## **Table of Contents**
+**Prereqs**
 
-1. [Features](#features)
-2. [Requirements](#requirements)
-3. [Installation](#installation)
-4. [Usage](#usage)
+- Python 3.10
+- A working QAI Hub account and credentials configured locally (so `qai_hub` can submit jobs)
 
----
 
-## **Features**
-
-* **Preprocessing Scripts**: Includes resizing and normalization for image inputs, and tokenization for text inputs.
-* Extract CLIP Encoders: Extract image and text encoders from OpenAI-CLIP model and export as ONNX models.
-* **Model Compilation**: Supports compiling the model for a specific target device using QAI Hub.
-* **Model Profiling**: Submit and retrieve profiling results via QAI Hub.
-* **Dataset Upload**: Upload image and text datasets to AI Hub for inference.
-* **Inference & Evaluation**: Run inference on datasets and compute metrics such as Recall@10.
-
----
-
-## **Requirements**
-
-* Python 3.9 - 3.12
-* Torch and torchvision
-* QAI Hub
-* Required packages listed in `requirements.txt`
-
----
-
-## **Installation**
-
-### **Step 1: Clone the Repository**
 
 ```bash
-git clone https://github.com/thedeveloper101/cmsc-472-final-project.git
-cd cmsc472-final-project
-```
-
-### **Step 2: Install Dependencies**
-
-Ensure you have Python 3.9 - 3.12 installed. Install the required Python packages:
-
-```bash
-pip install -e .
+conda create -n clipenv python=3.10
+conda activate clipenv
+python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
----
 
-## **Downloading The Dataset**
 
-### **1. Downloading the Images**
+## Project Configuration
 
-Run this bash script to download the dataset's images
-```bash
-bash data/dowmload_imgs.sh
+This project uses `config.ini` for a couple repo-relative paths:
+
+- `COCO_PATH`: expected local COCO location for some scripts
+- `RESULTS_PATH`: where outputs (ONNX artifacts, experiment summaries, etc.) are written
+
+Default:
+
+```ini
+[DEFAULT]
+COCO_PATH=data/coco
+RESULTS_PATH=results
 ```
 
-### **2. Downloading the Annotations**
-Run this python script download the dataset's annotations.
-```bash
-python data/download_RefCOCO
-```
+Most of the QAI-Hub-driven pipeline (including `experiments.py`) uses the HuggingFace
+dataset `yerevann/coco-karpathy` for upload/eval and will write outputs under `results/`.
 
----
-## **Usage**
 
-### **1. Export ONNX Models**
 
-Execute the script to export the encoders as ONNX models:
+## Using `experiments.py`
 
-```bash
-python src/export_onnx.py
-```
+`src/experiments.py` runs the full pipeline:
 
-### **2. Compile and Profile**
+1. Upload image/text datasets to QAI Hub (with caching in `datasets.json`)
+2. Export ONNX artifacts under `results/onnx_experiments/...`
+3. Submit compile jobs once per model
+4. Submit quantization jobs once per model (if `--quantize` is set)
+5. Submit inference jobs (text encoder, image encoder in batches, and top-k)
+6. Write a JSON summary to `results/experiments/experiments_<timestamp>.json` or a custom path.
 
-```bash
-python src/compile_and_profile.py
-```
+### Basic Runs
 
-This script will:
-
-* Upload the ONNX models to AI Hub and submit a compile job.
-* Submit a profiling job with the compiled models.
-
-### **3. Upload Dataset**
-
-Before running inference, datasets must be uploaded to AI Hub using `upload_dataset.py`. This script handles:
-
-* Formatting images and text data into the structure expected by QAI Hub. (image: (1,3,224,224), txt: (1,77))
-* Uploading the dataset and returning a dataset ID to be used in inference scripts.
+Run all models with both top-k modes:
 
 ```bash
-python data/upload_dataset.py
+python src/experiments.py
 ```
 
-This will print a `dataset_id` that you can use in `src/inference.py`.
-
-### **4. Run Inference and Evaluate**
-
-The `inference.py` script runs the compiled models on the uploaded datasets:
-
-1. Retrieves the compiled image and text encoders from AI Hub.
-2. Runs inference on the uploaded datasets.
-3. Collects output embeddings for images and text.
-4. Computes evaluation metrics, such as **Recall@10**, which measures how often the correct text is among the top-10 retrieved results for each image.
+Run a single model:
 
 ```bash
-python src/inference.py
+python src/experiments.py --models "MobileCLIP2-S0"
 ```
 
-After completion, the script prints the Recall@10 score for the dataset.
+Run cosine top-k only:
+
+```bash
+python src/experiments.py --topk "cosine"
+```
+
+Run FAISS top-k only (also selects a compute unit for FAISS compilation/inference):
+
+```bash
+python src/experiments.py --topk "faiss" --faiss-compute-unit "gpu"
+```
+
+Write results to a specific file:
+
+```bash
+python src/experiments.py --output results/experiments/my_run.json
+```
+
+### Dataset Size / Batching
+
+Control the evaluation size (number of images; texts are `num_images * 5` captions):
+
+```bash
+python src/experiments.py --num-images 200
+```
+
+Control image upload and image-encoder inference batch sizing:
+
+```bash
+python src/experiments.py --images-per-batch 250
+```
+
+Control top-k inference batch sizing (defaults to `--images-per-batch`):
+
+```bash
+python src/experiments.py --topk-images-per-batch 250
+```
+
+### Quantization
+
+You can quantize both encoders during compilation:
+
+```bash
+python src/experiments.py --quantize int16
+```
+
+Quantization requires calibration datasets. You can either:
+
+1. Let the script upload calibration datasets automatically (default behavior when `--quantize` is set and no IDs are provided), or
+2. Provide existing QAI Hub calibration dataset IDs:
+
+```bash
+python src/experiments.py \
+  --quantize int8 \
+  --image-calibration-id <QAI_HUB_IMAGE_CAL_ID> \
+  --text-calibration-id <QAI_HUB_TEXT_CAL_ID>
+```
+
+Control how many samples are used when uploading calibration datasets:
+
+```bash
+python src/experiments.py --quantize int16 --calibration-samples 200
+```
+
+### Caching Behavior
+
+Dataset uploads are cached in `datasets.json` by a stable key derived from:
+
+- dataset split + size
+- preprocessing signature (mean/std, forced 224x224)
+- tokenizer signature (shape/dtype)
+
+To disable reuse:
+
+```bash
+python src/experiments.py --no-cache
+```
+
+To prevent writing new cache entries:
+
+```bash
+python src/experiments.py --no-cache-write
+```
+
+### Device / Job Naming
+
+Choose a target device (must exist in your QAI Hub account):
+
+```bash
+python src/experiments.py --device "XR2 Gen 2 (Proxy)"
+```
+
+Add a prefix to the QAI Hub job names (useful in the Hub UI when running multiple trials):
+
+```bash
+python src/experiments.py --job-name-prefix "cmsc472"
+```
+
+### CLI Help (`--help`)
+
+The flags for `src/experiments.py` are defined via `argparse`. Help text:
+
+```text
+usage: experiments.py [-h]
+                      [--models [{MobileCLIP-S1,MobileCLIP2-S0,MobileCLIP2-S2,MobileCLIP2-B,MobileCLIP2-S3} ...]]
+                      [--topk {cosine,faiss,both}] [--num-images NUM_IMAGES]
+                      [--device DEVICE]
+                      [--faiss-compute-unit {all,npu,gpu,cpu}]
+                      [--quantize [{w4a8,w8a16,w4a16,int8,int16}]]
+                      [--image-calibration-id IMAGE_CALIBRATION_ID]
+                      [--text-calibration-id TEXT_CALIBRATION_ID]
+                      [--calibration-samples CALIBRATION_SAMPLES]
+                      [--images-per-batch IMAGES_PER_BATCH]
+                      [--topk-images-per-batch TOPK_IMAGES_PER_BATCH]
+                      [--job-name-prefix JOB_NAME_PREFIX] [--output OUTPUT]
+                      [--cache | --no-cache]
+                      [--cache-write | --no-cache-write]
+
+Run compile and inference benchmarks across models/topk modes.
+
+options:
+  -h, --help            show this help message and exit
+  --models [{MobileCLIP-S1,MobileCLIP2-S0,MobileCLIP2-S2,MobileCLIP2-B,MobileCLIP2-S3} ...]
+                        Models to benchmark. If omitted, benchmarks all
+                        models.
+  --topk {cosine,faiss,both}
+                        Which topk mode(s) to benchmark.
+  --num-images NUM_IMAGES
+                        Number of images to evaluate (default from utils.py:
+                        1000).
+  --device DEVICE       QAI Hub target device
+  --faiss-compute-unit {all,npu,gpu,cpu}
+                        Compute unit for FAISS compile and inference jobs
+                        (only applies with --topk faiss)
+  --quantize [{w4a8,w8a16,w4a16,int8,int16}]
+                        Apply post-training quantization to both encoders
+                        during compilation. If provided without a value,
+                        defaults to int16.
+  --image-calibration-id IMAGE_CALIBRATION_ID
+                        QAI Hub dataset ID for image calibration data
+                        (required for --quantize)
+  --text-calibration-id TEXT_CALIBRATION_ID
+                        QAI Hub dataset ID for text calibration data (required
+                        for --quantize)
+  --calibration-samples CALIBRATION_SAMPLES
+                        Number of validation samples to use for quantization
+                        calibration (default from utils.py: 200).
+  --images-per-batch IMAGES_PER_BATCH
+                        Images per uploaded dataset and per image-encoder
+                        inference job (default: 1000).
+  --topk-images-per-batch TOPK_IMAGES_PER_BATCH
+                        Images per top-k inference job (default: same as
+                        --images-per-batch).
+  --job-name-prefix JOB_NAME_PREFIX
+                        Optional prefix for QAI Hub inference job names to
+                        make jobs easier to identify in the UI.
+  --output OUTPUT       Optional path to write a JSON summary.
+  --cache, --no-cache   Reuse datasets via datasets.json. (default: True)
+  --cache-write, --no-cache-write
+                        Write uploaded dataset info into datasets.json.
+                        (default: True)
+```
+
+
+## Output Artifacts
+
+- Experiment summaries: `results/experiments/experiments_YYYYMMDD_HHMMSS.json` or a custom path.
+- ONNX exports for experiments: `results/onnx_experiments/<key>/<model_name>/...`
+- Dataset cache registry: `datasets.json`
+- Some scripts may also update `job_ids.json` with the “last run” IDs

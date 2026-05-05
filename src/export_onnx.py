@@ -1,115 +1,186 @@
-import torch
+import argparse
 import os
-from qai_hub_models.models.openai_clip.model import OpenAIClip
 
-# --- Configuration for File Saving ---
-ONNX_DIR = "exported_onnx"
-device = torch.device("cpu") # use CPU to export onnx model to avoid GPU device issues
-# -----------------------------------
+import open_clip
+import torch
+from timm.utils import reparameterize_model
 
-# -----------------------------
-# 1. Prepare Environment
-# -----------------------------
-os.makedirs(ONNX_DIR, exist_ok=True)
-print(f"Saving ONNX files to directory: {os.path.abspath(ONNX_DIR)}")
+from utils import MODELS, MODEL_PRETRAINED, RESULTS_PATH, NUM_IMAGE_SAMPLES, CAPTIONS_PER_IMAGE, K, TOPK_IMAGES_PER_BATCH
 
-# -----------------------------
-# 2. Dummy inputs
-# -----------------------------
-DUMMY_IMAGE_INPUT = torch.rand(1, 3, 224, 224, dtype=torch.float32, device=device)
-DUMMY_TEXT_INPUT = torch.randint(0, 49408, (1, 77), dtype=torch.int64, device=device)
+device = torch.device("cpu")  # use CPU to avoid GPU device issues during export
 
-# -----------------------------
-# 3. Load OpenAIClip wrapper and define encoders
-# -----------------------------
-print("Loading OpenAIClip wrapper model...")
-clip_wrapper_model = OpenAIClip.from_pretrained().to(device)
-clip_wrapper_model.eval()
-
-clip_model = clip_wrapper_model.clip.to(device)
-clip_model = clip_model.to(torch.float32) # convert all model params to float32 type, consistent with input type in compiling and profiling via AIHub
-clip_model.eval()
 
 class ImageEncoderWrapper(torch.nn.Module):
-    def __init__(self, clip_model):
+    def __init__(self, model):
         super().__init__()
-        self.visual = clip_model.visual
+        self.model = model
 
     def forward(self, images):
-        return self.visual(images)
+        return self.model.encode_image(images)
+
 
 class TextEncoderWrapper(torch.nn.Module):
-    def __init__(self, clip_model):
+    def __init__(self, model):
         super().__init__()
-        self.token_embedding = clip_model.token_embedding
-        self.positional_embedding = clip_model.positional_embedding
-        self.transformer = clip_model.transformer
-        self.ln_final = clip_model.ln_final
-        self.text_projection = clip_model.text_projection
+        self.model = model
 
     def forward(self, token_ids):
-        x = self.token_embedding(token_ids)
-        x = x + self.positional_embedding
-        x = x.permute(1, 0, 2)
-        x = self.transformer(x)
-        x = x.permute(1, 0, 2)
-        x = self.ln_final(x)
-        eos_index = token_ids.argmax(dim=-1)
-        x = x[torch.arange(x.shape[0]), eos_index]
-        x = x @ self.text_projection
-        return x
-
-# -----------------------------
-# 4. Create wrapper instances
-# -----------------------------
-image_encoder = ImageEncoderWrapper(clip_model)
-text_encoder = TextEncoderWrapper(clip_model)
-image_encoder.eval()
-text_encoder.eval()
+        return self.model.encode_text(token_ids.to(torch.int64))
 
 
-# -----------------------------
-# 5. Export Image Encoder
-# -----------------------------
-image_onnx_path = os.path.join(ONNX_DIR, "image_encoder.onnx")
-print(f"\nExporting Image Encoder to {image_onnx_path}...")
+class TopKWrapper(torch.nn.Module):
+    """Computes cosine similarity and returns top-k text indices for each image."""
 
-# noinspection PyTypeChecker
-torch.onnx.export(
-    image_encoder,
-    DUMMY_IMAGE_INPUT,
-    image_onnx_path,
-    input_names=["image"],
-    output_names=["embedding"],
-    opset_version=18,
-    do_constant_folding=True,
-    dynamic_axes=None,
-    verbose=False,
-    export_params=True,
-    training=torch.onnx.TrainingMode.EVAL,
-    dynamo=True,
-)
+    def __init__(self, k: int):
+        super().__init__()
+        self.k = k
 
-# -----------------------------
-# 6. Export Text Encoder
-# -----------------------------
-text_onnx_path = os.path.join(ONNX_DIR, "text_encoder.onnx")
-print(f"\nExporting Text Encoder to {text_onnx_path}...")
+    def forward(self, image_embs, text_embs):
+        # image_embs: [N_img, D], text_embs: [N_txt, D], both L2-normalized
+        sims = image_embs @ text_embs.T  # [N_img, N_txt]
+        return torch.topk(sims, self.k, dim=-1).indices.to(torch.int32)  # [N_img, K]
 
-# noinspection PyTypeChecker
-torch.onnx.export(
-    text_encoder,
-    DUMMY_TEXT_INPUT,
-    text_onnx_path,
-    input_names=["text"],
-    output_names=["text_embedding"],
-    opset_version=18,
-    do_constant_folding=True,
-    dynamic_axes=None,
-    verbose=False,
-    export_params=True,
-    training=torch.onnx.TrainingMode.EVAL,
-    dynamo=True,
-)
 
-print("\nExport complete.")
+def export_model(
+    *,
+    model_name: str,
+    pretrained: str,
+    image_size: int,
+    num_images: int,
+    images_per_batch: int,
+    onnx_root: str,
+):
+    onnx_dir = os.path.join(onnx_root, model_name)
+    os.makedirs(onnx_dir, exist_ok=True)
+    print(f"\n── {model_name} ──")
+    print(f"Loading model (pretrained={pretrained})...")
+
+    model, _, _ = open_clip.create_model_and_transforms(model_name, pretrained=pretrained)
+    model = model.to(torch.float32)  # consistent with input type for QAI Hub compiling
+    model.eval()
+    model = reparameterize_model(model)
+    model = model.to(device)
+
+    # NOTE: Some OpenCLIP variants report / use a larger default resolution (e.g., 256).
+    # This repo's datasets are uploaded as 224x224 (see upload_dataset.py), so we force
+    # ONNX export to 224x224 (or user-specified --image-size) to keep Hub compile/inference
+    # input specs consistent across models.
+    image_h = image_w = int(image_size)
+
+    dummy_image = torch.rand(1, 3, image_h, image_w, dtype=torch.float32, device=device)
+    dummy_text = torch.randint(0, model.vocab_size, (1, model.context_length), dtype=torch.int32, device=device)
+
+    with torch.no_grad():
+        embed_dim = model.encode_image(dummy_image).shape[-1]
+
+    image_encoder = ImageEncoderWrapper(model).eval()
+    text_encoder = TextEncoderWrapper(model).eval()
+    topk_model = TopKWrapper(k=K).eval()
+
+    image_onnx_path = os.path.join(onnx_dir, "image_encoder.onnx")
+    print(f"Exporting image encoder → {image_onnx_path}...")
+    torch.onnx.export(
+        image_encoder,
+        dummy_image,
+        image_onnx_path,
+        input_names=["image"],
+        output_names=["embedding"],
+        opset_version=18,
+        do_constant_folding=True,
+        dynamic_axes=None,
+        verbose=False,
+        export_params=True,
+        training=torch.onnx.TrainingMode.EVAL,
+        dynamo=True,
+    )
+
+    text_onnx_path = os.path.join(onnx_dir, "text_encoder.onnx")
+    print(f"Exporting text encoder  → {text_onnx_path}...")
+    torch.onnx.export(
+        text_encoder,
+        dummy_text,
+        text_onnx_path,
+        input_names=["text"],
+        output_names=["text_embedding"],
+        opset_version=18,
+        do_constant_folding=True,
+        dynamic_axes=None,
+        verbose=False,
+        export_params=True,
+        training=torch.onnx.TrainingMode.EVAL,
+        dynamo=True,
+    )
+    topk_onnx_path = os.path.join(onnx_dir, "topk_retrieval.onnx")
+    # Top-k inference runs in image batches to avoid oversized datasets and to match the
+    # compiled input spec of the top-k model.
+    dummy_image_embs = torch.rand(int(images_per_batch), embed_dim, dtype=torch.float32, device=device)
+    num_text_samples = int(num_images) * int(CAPTIONS_PER_IMAGE)
+    dummy_text_embs = torch.rand(num_text_samples, embed_dim, dtype=torch.float32, device=device)
+    print(f"Exporting top-k retrieval  → {topk_onnx_path}...")
+    torch.onnx.export(
+        topk_model,
+        (dummy_image_embs, dummy_text_embs),
+        topk_onnx_path,
+        input_names=["image_embs", "text_embs"],
+        output_names=["topk_indices"],
+        opset_version=18,
+        do_constant_folding=True,
+        dynamic_axes=None,
+        verbose=False,
+        export_params=True,
+        training=torch.onnx.TrainingMode.EVAL,
+        dynamo=True,
+    )
+    print(f"Export complete for {model_name}.")
+
+def build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser()
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--model", choices=MODELS, help="Single model to export")
+    group.add_argument("--all", action="store_true", help="Export all models")
+    parser.add_argument("--image-size", type=int, default=224,
+                        help="Force image input resolution H=W for all exported image encoders (default: 224).")
+    parser.add_argument("--num-images", type=int, default=NUM_IMAGE_SAMPLES,
+                        help="Total number of images in the evaluation dataset. Used to size the top-k text embedding input "
+                             "(num_images * captions_per_image).")
+    parser.add_argument("--images-per-batch", type=int, default=TOPK_IMAGES_PER_BATCH,
+                        help="Number of image embeddings per top-k inference batch. Default is TOPK_IMAGES_PER_BATCH.")
+    parser.add_argument("--onnx-root", default=os.path.join(RESULTS_PATH, "onnx"),
+                        help="Root directory to write ONNX artifacts into (default: <results_path>/onnx).")
+    return parser
+
+
+def export_models(
+    *,
+    models: list[str],
+    image_size: int,
+    num_images: int,
+    images_per_batch: int,
+    onnx_root: str,
+) -> None:
+    for model_name in models:
+        export_model(
+            model_name=model_name,
+            pretrained=MODEL_PRETRAINED[model_name],
+            image_size=image_size,
+            num_images=num_images,
+            images_per_batch=images_per_batch,
+            onnx_root=onnx_root,
+        )
+
+
+def main(argv=None):
+    parser = build_arg_parser()
+    args = parser.parse_args(argv)
+    targets = MODELS if args.all else [args.model]
+    export_models(
+        models=targets,
+        image_size=int(args.image_size),
+        num_images=int(args.num_images),
+        images_per_batch=int(args.images_per_batch),
+        onnx_root=str(args.onnx_root),
+    )
+
+
+if __name__ == "__main__":
+    main()

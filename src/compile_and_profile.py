@@ -1,100 +1,385 @@
-import qai_hub
-import onnx
+import argparse
 import os
-import sys
 
-from utils.job_utils import JOB_IDS
+import numpy as np
+import onnx
+import qai_hub
+import torch
 
-# --- Configuration ---
-ONNX_DIR = "exported_onnx"
+from utils import RESULTS_PATH, MODELS, K, JOB_IDS, IMAGES_PER_BATCH
+
+# NOTE: This module is responsible for submitting compile/profile jobs.
+# Inference/evaluation lives in src/inference.py and src/upload_and_run.py.
+
+# ONNX element type codes → QAI Hub dtype strings
+ONNX_ELEM_TYPE = {1: "float32", 6: "int32", 7: "int64"}
 
 
-# ---------------------
+class FAISSIndexWrapper(torch.nn.Module):
+    """Mimics faiss.IndexFlatIP: text embeddings are baked in as weights (the
+    index), and only image embeddings are passed at inference time."""
 
-def run_profile(model, device):
-    """Submit a profile job for the model."""
-    profile_job = qai_hub.submit_profile_job(
-        model=model,
-        device=device,
-        options="--max_profiler_iterations 100"
+    def __init__(self, text_embs: np.ndarray, k: int):
+        super().__init__()
+        self.register_buffer("index", torch.from_numpy(text_embs))
+        self.k = k
+
+    def forward(self, image_embs):
+        # image_embs: [N_img, D] — L2-normalized
+        sims = image_embs @ self.index.T  # [N_img, N_txt]
+        return torch.topk(sims, self.k, dim=-1).indices.to(torch.int32)  # [N_img, K]
+
+
+def build_arg_parser():
+    parser = argparse.ArgumentParser()
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--model", choices=MODELS, help="Single model to compile and profile")
+    group.add_argument("--all", action="store_true", help="Compile and profile all models")
+    parser.add_argument("--text-dataset-id", default=JOB_IDS["text", "dataset_id"],
+                        help="QAI Hub dataset ID for texts  (from upload_dataset.py). "
+                             "If omitted, uses job_ids.json.")
+    parser.add_argument("--device", default="XR2 Gen 2 (Proxy)", help="QAI Hub target device")
+    parser.add_argument("--onnx-root", default=os.path.join(RESULTS_PATH, "onnx"),
+                        help="Root directory where ONNX artifacts live (default: <results_path>/onnx).")
+    parser.add_argument("--topk", choices=["cosine", "faiss"], default="cosine",
+                        help="How to compute top-k on the QAS device: cosine(default) or via FAISS")
+    parser.add_argument("--faiss-compute-unit", choices=["all", "npu", "gpu", "cpu"], default="all",
+                        help="Compute unit for FAISS compile and inference jobs (only applies with --topk faiss)")
+    parser.add_argument("--profile", action="store_true", help="Submit profile jobs after recall is computed")
+    # Optional arg:
+    #   no flag => no quantization
+    #   --quantize <type> => quantize both encoders using the given quantization type
+    parser.add_argument(
+        "--quantize",
+        nargs="?",
+        const="int16",
+        default=None,
+        choices=["w4a8", "w8a16", "w4a16", "int8", "int16"],
+        help="Apply post-training quantization to both encoders during compilation. "
+             "If provided without a value, defaults to int16. (uses Quantize Job API).",
     )
-    return profile_job.job_id
+    parser.add_argument("--image-calibration-id", default=None,
+                        help="QAI Hub dataset ID for image calibration data (from upload_calibration.py)")
+    parser.add_argument("--text-calibration-id", default=None,
+                        help="QAI Hub dataset ID for text calibration data (from upload_calibration.py)")
+    return parser
 
 
-def compile_model(model, device, input_specs):
-    """Submits a compile job for the model and returns the job instance."""
-    compile_job = qai_hub.submit_compile_job(
-        model=model,
-        device=device,
-        input_specs=input_specs,
-        options="--target_runtime qnn_dlc --truncate_64bit_io"
+def get_input_specs(onnx_model):
+    """Read input names, shapes, and dtypes directly from the ONNX graph."""
+    specs = {}
+    for inp in onnx_model.graph.input:
+        shape = tuple(d.dim_value for d in inp.type.tensor_type.shape.dim)
+        elem_type = inp.type.tensor_type.elem_type
+        if elem_type == 1:  # float32 is the QAI Hub default; omit dtype
+            specs[inp.name] = shape
+        else:
+            specs[inp.name] = (shape, ONNX_ELEM_TYPE[elem_type])
+    return specs
+
+
+def first_output(job):
+    """Return the first output array list from an inference job.
+    QAI Hub renames outputs to output_0, output_1, … regardless of export names."""
+    job_id = getattr(job, "job_id", "<unknown>")
+    status = "<unknown>"
+    try:
+        status = job.wait()
+    except Exception:
+        pass
+
+    outputs = job.download_output_data()
+    if outputs is None:
+        raise RuntimeError(
+            f"QAI Hub inference job produced no outputs (job_id={job_id}, status={status}). "
+            f"Check the job page/logs for details."
+        )
+    return next(iter(outputs.values()))
+
+
+def load_and_validate(path, label):
+    print(f"  Loading {label} from {path}...")
+    model = onnx.load(path)
+    try:
+        onnx.checker.check_model(model)
+        print(f"  {label} valid ✅")
+    except onnx.checker.ValidationError as e:
+        print(f"  {label} invalid ❌: {e}")
+        return None
+    return model
+
+
+def compile_model(
+    *,
+    target_device,
+    onnx_img,
+    onnx_txt,
+    onnx_topk,
+    compile_options: str,
+    image_calib_dataset,
+    text_calib_dataset,
+    topk: str,
+    persist_job_ids: bool = True,
+    job_name_prefix: str = "",
+    quantize: bool = False,
+    quantize_type: str = "int16",
+):
+    """Submit compile jobs and persist compile job IDs to job_ids.json.
+
+    This function only *submits* compile jobs; it does not block waiting for
+    completion. Downstream steps should use the returned job IDs.
+    """
+    print("  Submitting compile jobs...")
+    prefix = (job_name_prefix.strip() + " ") if job_name_prefix and job_name_prefix.strip() else ""
+
+    # Quantize Job API (preferred) – replaces deprecated --quantize_full_type.
+    quantized_img = onnx_img
+    quantized_txt = onnx_txt
+    if quantize:
+        if image_calib_dataset is None or text_calib_dataset is None:
+            raise ValueError("quantize=True requires image_calib_dataset and text_calib_dataset")
+        qt = str(quantize_type).lower()
+        if qt == "int8":
+            w_dtype = qai_hub.QuantizeDtype.INT8
+            a_dtype = qai_hub.QuantizeDtype.INT8
+        elif qt == "int16":
+            w_dtype = qai_hub.QuantizeDtype.INT16
+            a_dtype = qai_hub.QuantizeDtype.INT16
+        elif qt == "w4a8":
+            w_dtype = qai_hub.QuantizeDtype.INT4
+            a_dtype = qai_hub.QuantizeDtype.INT8
+        elif qt == "w4a16":
+            w_dtype = qai_hub.QuantizeDtype.INT4
+            a_dtype = qai_hub.QuantizeDtype.INT16
+        elif qt == "w8a16":
+            w_dtype = qai_hub.QuantizeDtype.INT8
+            a_dtype = qai_hub.QuantizeDtype.INT16
+        else:
+            raise ValueError(f"Unsupported quantize_type for Quantize Job API: {quantize_type}")
+
+        print("  Submitting quantize jobs...")
+        q_img = qai_hub.submit_quantize_job(
+            onnx_img,
+            calibration_data=image_calib_dataset,
+            weights_dtype=w_dtype,
+            activations_dtype=a_dtype,
+            name=f"{prefix}quantize :: image-encoder",
+        )
+        q_txt = qai_hub.submit_quantize_job(
+            onnx_txt,
+            calibration_data=text_calib_dataset,
+            weights_dtype=w_dtype,
+            activations_dtype=a_dtype,
+            name=f"{prefix}quantize :: text-encoder",
+        )
+
+        # Block until quantization completes, then compile the quantized ONNX model artifacts.
+        quantized_img = q_img.get_target_model()
+        if quantized_img is None:
+            raise RuntimeError("Quantize job (image) failed to produce a target model.")
+        quantized_txt = q_txt.get_target_model()
+        if quantized_txt is None:
+            raise RuntimeError("Quantize job (text) failed to produce a target model.")
+
+    image_compile_job = qai_hub.submit_compile_job(
+        model=quantized_img,
+        device=target_device,
+        input_specs=get_input_specs(onnx_img),
+        options=compile_options,
+        name=f"{prefix}image-encoder",
     )
-    return compile_job.job_id
+    text_compile_job = qai_hub.submit_compile_job(
+        model=quantized_txt,
+        device=target_device,
+        input_specs=get_input_specs(onnx_txt),
+        options=compile_options,
+        name=f"{prefix}text-encoder",
+    )
+    if persist_job_ids:
+        JOB_IDS["image", "compiled_id"] = image_compile_job.job_id
+        JOB_IDS["text", "compiled_id"] = text_compile_job.job_id
+
+    topk_compile_job = None
+    if topk == "cosine":
+        topk_compile_job = qai_hub.submit_compile_job(
+            model=onnx_topk,
+            device=target_device,
+            input_specs=get_input_specs(onnx_topk),
+            options=compile_options,
+            name=f"{prefix}topk-cosine",
+        )
+        if persist_job_ids:
+            compiled_ids = (JOB_IDS.data.get("topk") or {}).get("compiled_ids") or {}
+            compiled_ids["cosine"] = topk_compile_job.job_id
+            JOB_IDS["topk", "compiled_ids"] = compiled_ids
+        print(f"  Compile job IDs — image: {image_compile_job.job_id}, text: {text_compile_job.job_id}, topk: {topk_compile_job.job_id}")
+    else:
+        print(f"  Compile job IDs — image: {image_compile_job.job_id}, text: {text_compile_job.job_id}")
+
+    return {
+        "image_compiled_id": image_compile_job.job_id,
+        "text_compiled_id": text_compile_job.job_id,
+        "topk_compiled_id": topk_compile_job.job_id if topk_compile_job is not None else None,
+    }
 
 
-# Construct the full paths
-IMAGE_ONNX_PATH = os.path.join(ONNX_DIR, "image_encoder.onnx")
-TEXT_ONNX_PATH = os.path.join(ONNX_DIR, "text_encoder.onnx")
+def compile_faiss_index_model(
+    *,
+    target_device,
+    text_compiled=None,
+    text_dataset=None,
+    onnx_dir: str,
+    faiss_compute_unit: str,
+    persist_job_ids: bool = True,
+    text_embs: np.ndarray | None = None,
+    job_name_prefix: str = "",
+    images_per_batch: int = IMAGES_PER_BATCH,
+):
+    """Build a FAISS index model by running text inference, baking embeddings, and compiling."""
+    if text_embs is None:
+        if text_compiled is None or text_dataset is None:
+            raise ValueError("compile_faiss_index_model requires either text_embs or (text_compiled and text_dataset)")
+        prefix = (job_name_prefix.strip() + " ") if job_name_prefix and job_name_prefix.strip() else ""
+        print("  Running text encoder inference to build FAISS index...")
+        text_inf_job = qai_hub.submit_inference_job(
+            model=text_compiled,
+            device=target_device,
+            inputs=text_dataset,
+            name=f"{prefix}faiss-index :: text",
+        )
+        text_embs = np.concatenate(first_output(text_inf_job), axis=0)
 
-if not os.path.exists(ONNX_DIR):
-    print(f"Error: Directory '{ONNX_DIR}' not found. Please run 'export_onnx.py' first.")
-    sys.exit(1)
+    # Ensure embeddings are normalized (compile-time constants in the wrapper).
+    text_embs = text_embs / np.linalg.norm(text_embs, axis=1, keepdims=True)
 
-# Load the ONNX models from the new location
+    faiss_model = FAISSIndexWrapper(text_embs, k=K).eval()
+    faiss_onnx_path = os.path.join(onnx_dir, "faiss_index.onnx")
+    dummy_img_embs = torch.rand(int(images_per_batch), text_embs.shape[1], dtype=torch.float32)
+    print(f"  Exporting FAISS index model → {faiss_onnx_path}...")
+    torch.onnx.export(
+        faiss_model,
+        dummy_img_embs,
+        faiss_onnx_path,
+        input_names=["image_embs"],
+        output_names=["topk_indices"],
+        opset_version=18,
+        do_constant_folding=True,
+        dynamic_axes=None,
+        verbose=False,
+        export_params=True,
+        training=torch.onnx.TrainingMode.EVAL,
+        dynamo=True,
+    )
+    onnx_faiss = load_and_validate(faiss_onnx_path, "FAISS index")
+    if onnx_faiss is None:
+        return None
 
-print(f"Loading ONNX Image Encoder from {IMAGE_ONNX_PATH}...")
-onnx_img_model = onnx.load(IMAGE_ONNX_PATH)
+    prefix = (job_name_prefix.strip() + " ") if job_name_prefix and job_name_prefix.strip() else ""
+    faiss_compile_job = qai_hub.submit_compile_job(
+        model=onnx_faiss,
+        device=target_device,
+        input_specs=get_input_specs(onnx_faiss),
+        options=f"--target_runtime qnn_dlc --compute_unit {faiss_compute_unit}",
+        name=f"{prefix}topk-faiss",
+    )
+    if persist_job_ids:
+        compiled_ids = (JOB_IDS.data.get("topk") or {}).get("compiled_ids") or {}
+        compiled_ids["faiss"] = faiss_compile_job.job_id
+        JOB_IDS["topk", "compiled_ids"] = compiled_ids
+    print(f"  FAISS compile job ID: {faiss_compile_job.job_id}")
+    return {
+        "topk_compiled_id": faiss_compile_job.job_id,
+    }
 
-# Check the model for errors
-try:
-    onnx.checker.check_model(onnx_img_model)
-    print("Image ONNX model is valid ✅")
-except onnx.checker.ValidationError as e:
-    print("Image ONNX model validation failed ❌")
-    print(e)
 
-print(f"\nLoading ONNX Text Encoder from {TEXT_ONNX_PATH}...")
-onnx_txt_model = onnx.load(TEXT_ONNX_PATH)
+def run_pipeline(args, *, persist_job_ids: bool = True):
+    parser = build_arg_parser()
+    if args.quantize and (args.image_calibration_id is None or args.text_calibration_id is None):
+        parser.error("--quantize requires --image-calibration-id and --text-calibration-id")
 
-# Check the model for errors
-try:
-    onnx.checker.check_model(onnx_txt_model)
-    print("Text ONNX model is valid ✅")
-except onnx.checker.ValidationError as e:
-    print("Text ONNX model validation failed ❌")
-    print(e)
+    compile_options = "--target_runtime qnn_dlc"
+    # Quantization is handled via submit_quantize_job (Quantize Job API). No compile flag needed.
 
-target_device = qai_hub.Device("XR2 Gen 2 (Proxy)")
+    image_calib_dataset = qai_hub.get_dataset(args.image_calibration_id) if args.quantize else None
+    text_calib_dataset = qai_hub.get_dataset(args.text_calibration_id) if args.quantize else None
 
-# Submit compilation jobs
-print("\nSubmitting compilation jobs to QAI Hub...")
-img_id = compile_model(
-    model=onnx_img_model,
-    device=target_device,
-    input_specs={"image": (1, 3, 224, 224)}
-)
+    targets = list(MODELS) if args.all else [args.model]
 
-JOB_IDS["image", "compiled_id"] = img_id
+    target_device = qai_hub.Device(args.device)
+    compiled_models = {}  # model_name -> list of compiled models to profile
 
-txt_id = compile_model(
-    model=onnx_txt_model,
-    device=target_device,
-    input_specs={"text": ((1, 77), "int64")}
-)
+    # Submit compile jobs for all models first (parallel on Hub side).
+    compile_jobs = {}  # model_name -> dict of compile job IDs
+    for model_name in targets:
+        print(f"\n{'─' * 60}")
+        print(f"Model: {model_name}")
+        print(f"{'─' * 60}")
 
-JOB_IDS["text", "compiled_id"] = txt_id
+        onnx_dir = os.path.join(args.onnx_root, model_name)
+        image_onnx_path = os.path.join(onnx_dir, "image_encoder.onnx")
+        text_onnx_path = os.path.join(onnx_dir, "text_encoder.onnx")
+        topk_onnx_path = os.path.join(onnx_dir, "topk_retrieval.onnx")
 
-print(f"Image compilation job ID: {img_id}")
-print(f"Text compilation job ID: {txt_id}")
+        required_paths = [image_onnx_path, text_onnx_path]
+        if args.topk == "cosine":
+            required_paths.append(topk_onnx_path)
+        if not all(os.path.exists(p) for p in required_paths):
+            print("  Skipping: ONNX not found. Run: python src/export_onnx.py --all")
+            continue
 
-# Submit profiling jobs
-print("\nSubmitting profiling jobs to QAI Hub...")
-run_profile(
-    model=qai_hub.get_job(img_id).get_target_model(),
-    device=target_device
-)
-run_profile(
-    model=qai_hub.get_job(txt_id).get_target_model(),
-    device=target_device
-)
-print("Profiling jobs submitted for both models.")
+        onnx_img = load_and_validate(image_onnx_path, "image encoder")
+        onnx_txt = load_and_validate(text_onnx_path, "text encoder")
+        onnx_topk = load_and_validate(topk_onnx_path, "top-k retrieval") if args.topk == "cosine" else None
+        if onnx_img is None or onnx_txt is None or (args.topk == "cosine" and onnx_topk is None):
+            continue
+
+        compile_jobs[model_name] = {
+            "onnx_dir": onnx_dir,
+            **compile_model(
+                target_device=target_device,
+                onnx_img=onnx_img,
+                onnx_txt=onnx_txt,
+                onnx_topk=onnx_topk,
+                compile_options=compile_options,
+                image_calib_dataset=image_calib_dataset,
+                text_calib_dataset=text_calib_dataset,
+                topk=args.topk,
+                persist_job_ids=persist_job_ids,
+                job_name_prefix=f"{model_name} :: ",
+                quantize=(args.quantize is not None),
+                quantize_type=(args.quantize or "int16"),
+            ),
+        }
+
+    # For profiling, we need compiled model objects (this blocks until the compile jobs finish).
+    if args.profile:
+        for model_name, cj in compile_jobs.items():
+            image_compiled = qai_hub.get_job(cj["image_compiled_id"]).get_target_model()
+            text_compiled = qai_hub.get_job(cj["text_compiled_id"]).get_target_model()
+            compiled_models[model_name] = [image_compiled, text_compiled]
+            if args.topk == "cosine" and cj.get("topk_compiled_id") is not None:
+                topk_compiled = qai_hub.get_job(cj["topk_compiled_id"]).get_target_model()
+                compiled_models[model_name].append(topk_compiled)
+
+    if args.profile:
+        print(f"\n{'─' * 60}")
+        print("Submitting profile jobs...")
+        for model_name, models in compiled_models.items():
+            jobs = [
+                qai_hub.submit_profile_job(model=m, device=target_device, options="--max_profiler_iterations 100")
+                for m in models
+            ]
+            print(f"  {model_name}: {[j.job_id for j in jobs]}")
+
+    # Return compile job IDs for programmatic use (experiments / combined runner).
+    return {k: {kk: vv for kk, vv in v.items() if kk.endswith("_id") or kk == "onnx_dir"} for k, v in compile_jobs.items()}
+
+
+def main(argv=None):
+    parser = build_arg_parser()
+    args = parser.parse_args(argv)
+    run_pipeline(args)
+
+
+if __name__ == "__main__":
+    main()
