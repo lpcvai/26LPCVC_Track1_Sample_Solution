@@ -14,7 +14,8 @@ This repository contains Python scripts designed to extract, compile, and profil
 2. [Requirements](#requirements)
 3. [Installation](#installation)
 4. [Usage](#usage)
-5. [Citation](#citation)
+5. [Acknowledgements](#acknowledgements)
+6. [Citation](#citation)
 
 ---
 
@@ -105,6 +106,11 @@ python inference.py
 ```
 
 After completion, the script prints the Recall@10 score for the dataset.
+
+---
+
+## Acknowledgements
+This material is based upon work supported by the National Science Foundation under Grant Number 2504445. Any opinions, findings, and conclusions or recommendations expressed in this material are those of the author(s) and do not necessarily reflect the views of the National Science Foundation.
 
 ---
 
